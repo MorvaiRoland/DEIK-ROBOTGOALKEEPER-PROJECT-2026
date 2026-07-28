@@ -121,6 +121,7 @@ class XimeaCamera(BaseCamera):
         super().__init__(cam_info)
 
         # Kamera konfiguráció mentése
+        self._config = config
         self._camera_index = camera_index
         self._serial_number = serial_number
         self._target_fps = float(config.get("fps", 100))
@@ -286,6 +287,24 @@ class XimeaCamera(BaseCamera):
         # --- Képformátum ---
         # XI_RGB24 = Ximea 24-bites színes formátum (OpenCV-hez BGR-ré konvertáljuk)
         self._cam.set_imgdataformat("XI_RGB24")
+
+        # --- Fehéregyensúly (White Balance) ---
+        # Színes CMOS szenzoroknál (Sony IMX174) AWB nélkül a kép zöldes árnyalatú,
+        # mert a Bayer-mátrix 50%-a zöld szűrős pixel (RGGB).
+        try:
+            if self._config.get("auto_white_balance", True):
+                self._cam.enable_auto_wb()
+                logger.debug("  Automatikus fehéregyensúly (AWB) bekapcsolva")
+            else:
+                kr = float(self._config.get("wb_kr", 1.8))
+                kg = float(self._config.get("wb_kg", 1.0))
+                kb = float(self._config.get("wb_kb", 2.1))
+                self._cam.set_wb_kr(kr)
+                self._cam.set_wb_kg(kg)
+                self._cam.set_wb_kb(kb)
+                logger.debug("  Manuális fehéregyensúly beállítva: R=%.2f, G=%.2f, B=%.2f", kr, kg, kb)
+        except Exception as exc:
+            logger.warning("  Fehéregyensúly beállítási hiba: %s", exc)
 
         # --- Akvizíciós puffer méret növelése (nagy FPS-hez) ---
         # Alapértelmezett 70 MB → 256 MB (csökkenti az eldobott frame-eket)

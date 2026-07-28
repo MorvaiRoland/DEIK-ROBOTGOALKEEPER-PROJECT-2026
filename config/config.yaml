@@ -54,6 +54,12 @@ camera:
   serial_number_left: "CACAU2546000"
   serial_number_right: "CACAU2517001"
 
+  # Fehéregyensúly (White Balance) – megszünteti a nyers Bayer szenzor zöldes árnyalatát
+  auto_white_balance: true
+  wb_kr: 1.8   # Piros erősítés (ha auto_white_balance: false)
+  wb_kg: 1.0   # Zöld erősítés
+  wb_kb: 2.1   # Kék erősítés
+
   # Mock kamera videófájlok (csak type="mock" esetén)
   mock:
     left_source: 0           # 0 = alapértelmezett webcam, vagy videófájl elérési út
