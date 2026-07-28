@@ -1,0 +1,273 @@
+# =============================================================================
+# DEIK Robot Foci Kapus – Fő Konfiguráció
+# =============================================================================
+#
+# Ez a fájl tartalmazza az összes rendszerparamétert.
+# Szerkesztés előtt olvasd el a megjegyzéseket!
+#
+# KOORDINÁTA-RENDSZER:
+#   Origó: a kapu közepének talajon lévő pontja
+#   X tengely: vízszintes (bal → jobb pozitív)  [mm]
+#   Y tengely: függőleges (talaj → felfelé pozitív)  [mm]
+#   Z tengely: mélység (kapu → pályára pozitív)  [mm]
+#
+# GEOMETRIA:
+#   Bal kamera:  X = -2450 mm, Y = 2800 mm, Z = 0 mm
+#   Jobb kamera: X = +2450 mm, Y = 2800 mm, Z = 0 mm
+#   Kapu: X = [-2000, +2000] mm, Y = [0, 2000] mm, Z = 0 mm
+#   Lövőtávolság: Z = 8000 mm
+# =============================================================================
+
+
+# =============================================================================
+# Kamera konfiguráció
+# =============================================================================
+camera:
+  # Kamera típusa: "ximea" | "mock" | "webcam"
+  # "mock"   → webcam vagy videófájl (fejlesztéshez/teszteléshez)
+  # "ximea"  → valódi Ximea MC023CG-SY-UB kamerák
+  type: "ximea"
+
+  # Natív képfelbontás (Sony IMX174: 1936 × 1216)
+  resolution:
+    width: 1936
+    height: 1216
+
+  # Célzott frame rate (a kamera max. 165 FPS-t tud)
+  # Javasolt: 100 FPS – gyors mozgáshoz elegendő, USB sávszélesség stabil
+  fps: 100
+
+  # Zársebesség mikroszekundumban (1/fps * 1e6 a max mozgásblur nélkül)
+  # 100 FPS-nél: max 10000 µs; javasolt: 2000-5000 µs erős megvilágításnál
+  exposure_time_us: 3000
+
+  # Erősítés dB-ben (0.0 = erősítés nélkül)
+  # Csak gyenge fényviszonyoknál növeld!
+  gain_db: 0.0
+
+  # USB3 sávszélesség korlát (MB/s kameránként)
+  # Két kamera esetén a teljes sávszélesség 2 × korlát
+  # USB 3.0: ~400 MB/s max → kameránként 160-180 MB/s biztonságos
+  bandwidth_limit_mbs: 160
+
+  # Ximea gyári sorozatszámok (Serial Number) a két kamerához
+  serial_number_left: "CACAU2546000"
+  serial_number_right: "CACAU2517001"
+
+  # Mock kamera videófájlok (csak type="mock" esetén)
+  mock:
+    left_source: 0           # 0 = alapértelmezett webcam, vagy videófájl elérési út
+    right_source: 1          # 1 = második webcam
+    loop_video: true         # Videófájlok ismétlése
+
+
+# =============================================================================
+# Kamera geometria és optika
+# =============================================================================
+geometry:
+  # ----- Lencse: Fujifilm CF8ZA-1S -----
+  # Nominális fókusztávolság: 8 mm
+  focal_length_mm: 8.0
+
+  # Tényleges fókuszpont pixelben:
+  #   f_px = f_mm / pixel_size_mm
+  #   f_px = 8.0 / 0.00586 = 1365.2 px
+  # FIGYELEM: A pontos értéket a sztereó kalibrálás adja meg!
+  #           Ez csak egy becsült kezdőérték.
+  focal_length_px: 1365.2
+
+  # Szenzor pixel mérete (Sony IMX174): 5.86 µm
+  pixel_size_um: 5.86
+
+  # Szenzor fizikai mérete (mm)
+  sensor_width_mm: 11.345     # = 1936 × 5.86 µm
+  sensor_height_mm: 7.127     # = 1216 × 5.86 µm
+
+  # Képközéppont (principal point) – ideális esetben a szenzor közepe
+  # FIGYELEM: A pontos értéket a kalibrálás adja meg!
+  principal_point_x: 968.0    # = 1936 / 2
+  principal_point_y: 608.0    # = 1216 / 2
+
+  # ----- Sztereó elrendezés -----
+  # Kamerák X pozíciója a kapu közepétől:
+  left_camera_x_mm: -2450.0   # Bal kamera (negatív X)
+  right_camera_x_mm: 2450.0   # Jobb kamera (pozitív X)
+
+  # Baseline = a két kamera közötti vízszintes távolság
+  # baseline = 2 × 2450 = 4900 mm
+  baseline_mm: 4900.0
+
+  # Kamerák magassága a talajtól
+  camera_height_mm: 2800.0
+
+  # Kamerák Z pozíciója (kapu síkjától mért távolság)
+  # 0 = pontosan a kapuvonalon vannak
+  camera_z_offset_mm: 0.0
+
+  # ----- Kapu mérete -----
+  goal_width_mm: 4000.0       # 4 méter széles
+  goal_height_mm: 2000.0      # 2 méter magas
+
+  # ----- Pálya -----
+  # A lövő helye (ahol a labdát rúgják)
+  shooting_distance_mm: 8000.0  # 8 méter a kaputól
+
+
+# =============================================================================
+# Sztereó kalibrálás
+# =============================================================================
+stereo:
+  # Kalibrálási adatok mentési helye
+  calibration_file: "data/calibration/stereo_calibration.npz"
+
+  # Kalibráláshoz használt sakktábla paraméterei
+  # FONTOS: a belső sarkok száma (nem a négyzetek száma!)
+  chessboard:
+    inner_corners_x: 9      # Vízszintes belső sarokpontok száma
+    inner_corners_y: 6      # Függőleges belső sarokpontok száma
+    square_size_mm: 30.0    # Sakktábla négyzetének fizikai mérete mm-ben
+
+  # Minimum szükséges kalibrálási képpár (pontossághoz min. 20 ajánlott)
+  min_calibration_frames: 20
+
+  # Kalibrálás minőségi küszöb (RMSE pixelben)
+  # Ha az újrakalibrálási hiba nagyobb ennél, figyelmeztetést kapunk
+  max_acceptable_rmse_px: 1.0
+
+
+# =============================================================================
+# Labdadetektálás
+# =============================================================================
+detection:
+  # ----- YOLO modell -----
+  # Javasolt: yolov10n.pt (COCO pre-trained, sports ball osztály: 32)
+  # Custom tanítás után: models/custom_soccer_ball.pt (osztály: 0)
+  model_path: "models/yolov10n.pt"
+
+  # Az "sports ball" osztály indexe a COCO adatbázisban: 32
+  # Custom modellnél (1 osztáflyos): 0
+  ball_class_id: 32
+
+  # Detektálási megbízhatósági küszöb (0.0 – 1.0)
+  # Alacsonyabb → több hamis pozitív; Magasabb → kihagyott detektálások
+  confidence_threshold: 0.4
+
+  # IoU küszöb NMS-hez (Non-Maximum Suppression) – YOLOv10 ezt belülről kezeli
+  iou_threshold: 0.45
+
+  # Inferencia bemeneti méret (kisebb → gyorsabb, de kisebb tárgyak elveszhetnek)
+  # Ajánlott: 1280 (jó sebesség-pontosság arány RTX 3050-en)
+  input_size: 1280
+
+  # Inferencia eszköz: "cuda:0" = GPU (RTX 3050), "cpu" = processzor
+  device: "cuda:0"
+
+  # ByteTrack konfiguráció (automatikus multi-object tracking)
+  tracking:
+    enabled: true
+    # Tracker konfig fájl (ultralytics beépített)
+    tracker_config: "bytetrack.yaml"
+    # Hány frame-en "tartja ki" a tracker ha a detektor nem talál labdát
+    max_lost_frames: 15
+
+  # ----- Kalman szűrő (2D per-camera simítás) -----
+  kalman:
+    enabled: true
+    # Folyamaterrör (minél nagyobb, annál érzékenyebb az új mérésekre)
+    process_noise: 0.03
+    # Mérési zaj (minél nagyobb, annál inkább bíz a predikciós modellben)
+    measurement_noise: 0.1
+    # Ennyi frame nélküli detektálás után nullázzuk a szűrőt
+    max_coast_frames: 10
+
+  # ----- Region of Interest (ROI) -----
+  # Csak a kapu irányában lévő kép-tartomány feldolgozása
+  # Ez csökkenti az inferencia területet → gyorsabb futás
+  roi:
+    enabled: false   # Kalibrálás után érdemes engedélyezni
+    # ROI koordináták (relatív, 0.0 – 1.0)
+    x_min_rel: 0.0
+    x_max_rel: 1.0
+    y_min_rel: 0.1   # A kép tetejét (ég) kizárjuk
+    y_max_rel: 0.9   # A kép aljának kis részét kizárjuk
+
+
+# =============================================================================
+# Trajektória előrejelzés
+# =============================================================================
+prediction:
+  # Gravitáció (mm/s²) – Föld felszínén 9810 mm/s²
+  gravity_mm_s2: 9810.0
+
+  # Légellenállás koefficiense (dimenzió nélküli, 0 = nincs ellenállás)
+  # 5-ös focilabda: kb. 0.0003 – 0.0005
+  drag_coefficient: 0.0004
+
+  # A Z=0 síkban (kapuvonalon) prediktáljuk az impact-pontot
+  goal_plane_z_mm: 0.0
+
+  # Minimum detektálási pontok száma a predikció előtt
+  # (legalább N mérés kell a sebesség meghatározásához)
+  min_points_for_prediction: 3
+
+  # Trajektória történelem mérete (ennyi pontot tartunk meg)
+  trajectory_history_size: 30
+
+  # Predikciós megbízhatóság küszöb (ez alá nem mutatjuk a predikciót)
+  min_confidence_threshold: 0.4
+
+  # 3D Kalman szűrő trajektória simításhoz
+  kalman_3d:
+    process_noise: 0.1
+    measurement_noise: 5.0   # mm-es mérési bizonytalanság
+
+
+# =============================================================================
+# GUI megjelenítés
+# =============================================================================
+gui:
+  # Ablak cím
+  window_title: "DEIK Robot Foci Kapus – Vizualizációs Rendszer"
+
+  # Alapértelmezett téma: "dark" | "light"
+  theme: "dark"
+
+  # GUI frissítési ráta (FPS) – monitorhoz korlátozzuk
+  gui_fps_limit: 60
+
+  # Kamera nézet bélyegkép mérete (a natív felbontás lekicsinyítve)
+  camera_display_width: 960
+  camera_display_height: 600
+
+  # Overlay megjelenítési beállítások
+  overlay:
+    show_detection_box: true      # YOLO detektálási doboz
+    show_ball_center: true        # Labda középpontja
+    show_trajectory: true         # 2D trajektória overlay
+    show_confidence: true         # Konfidencia érték
+    show_tracking_id: true        # ByteTrack ID
+    show_fps_counter: true        # FPS számláló
+    show_3d_position: true        # 3D pozíció felirat
+
+  # Kapu vizualizátor beállítások
+  goal_view:
+    show_impact_prediction: true  # Becsapódási pont
+    show_shot_history: true       # Korábbi lövések
+    max_shot_history: 15          # Maximum megőrzött lövés
+
+
+# =============================================================================
+# Naplózás (logging)
+# =============================================================================
+logging:
+  # Napló szintje: "DEBUG" | "INFO" | "WARNING" | "ERROR"
+  level: "INFO"
+
+  # Napló fájl elérési útja (null = csak konzol)
+  log_file: "data/goalkeeper.log"
+
+  # Maximum napló fájl méret (MB)
+  max_log_size_mb: 50
+
+  # Megőrzött backup napló fájlok száma
+  backup_count: 3

@@ -1,0 +1,53 @@
+# =============================================================================
+# DEIK Robot Foci Kapus – Python Függőségek
+# =============================================================================
+# Telepítés: pip install -r requirements.txt
+#
+# Megjegyzések:
+#   - PyTorch CUDA verzióját külön kell telepíteni (lásd setup.sh)
+#   - A Ximea xiAPI-t a gyártói SDK tartalmazza (nem pip-alapú)
+#   - TensorRT-t a CUDA SDK mellé kell telepíteni az NVIDIA oldaláról
+# =============================================================================
+
+# --- Számítógépes látás alapkönyvtárak ---
+opencv-python>=4.10.0          # Képfeldolgozás, sztereó kalibrálás, rajzolás
+numpy>=1.26.0                   # Tömbkezelés, mátrixszámítás
+
+# --- Labdadetektálás (YOLOv10n) ---
+# Az ultralytics csomag tartalmazza: YOLOv8, YOLOv10, ByteTrack, ONNX export
+ultralytics>=8.3.0              # YOLO modellek, tracker integrációk
+
+# --- GUI ---
+PyQt6>=6.7.0                    # Modern Qt6 Python kötések
+pyqtgraph>=0.13.7               # Valós idejű grafikonok és vizualizáció
+PyOpenGL>=3.1.7                 # OpenGL renderelés (opcionális 3D nézet)
+PyOpenGL_accelerate>=3.1.7      # OpenGL teljesítmény gyorsítás
+
+# --- Konfiguráció ---
+PyYAML>=6.0.1                   # YAML konfiguráció olvasás/írás
+
+# --- Tudományos számítások (Kalman szűrő, trajektória) ---
+scipy>=1.13.0                   # Lineáris algebra, optimalizáció
+filterpy>=1.4.5                 # Kalman szűrő implementációk
+
+# --- Rendszermonitoring ---
+psutil>=5.9.8                   # CPU/RAM/GPU monitoring
+
+# --- Fejlesztési és tesztelési eszközök ---
+pytest>=8.2.0                   # Unit tesztek
+pytest-cov>=5.0.0               # Kód lefedettség mérés
+
+# =============================================================================
+# KÉZI TELEPÍTÉSEK (nem pip-alapú):
+#
+# 1. PyTorch CUDA 12.x (RTX 3050 támogatáshoz):
+#    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+# 2. Ximea xiAPI (Linux):
+#    Letöltés: https://www.ximea.com/support/wiki/apis/XIMEA_Linux_Software_Package
+#    Telepítés: sudo ./install
+#    Python API: cd api/Python/v3 && sudo python3 setup.py install
+#
+# 3. TensorRT (opcionális, 200+ FPS GPU sebességhez):
+#    https://developer.nvidia.com/tensorrt
+# =============================================================================

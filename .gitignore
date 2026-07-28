@@ -1,0 +1,68 @@
+# DEIK Robot Foci Kapus – .gitignore
+# =====================================
+
+# Python cache fájlok
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Virtuális környezetek
+venv/
+env/
+.venv/
+.env/
+
+# PyCharm / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Naplófájlok
+*.log
+data/goalkeeper.log
+
+# YOLO / AI modell fájlok (nagy fájlok – külön letöltendők)
+models/*.pt
+models/*.onnx
+models/*.engine
+models/*.trt
+!models/.gitkeep
+!models/README.md
+
+# Kalibrálási adatok (opcionálisan verziókövetett)
+# Kommenteld ki, ha szeretnéd verziókövetni a kalibrálási adatokat:
+# data/calibration/stereo_calibration.npz
+!data/calibration/.gitkeep
+
+# Felvételek
+data/recordings/
+!data/recordings/.gitkeep
+
+# Numpy / pickle adatfájlok
+*.npy
+*.npz
+*.pkl
+
+# Operációs rendszer
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Ximea SDK (ha kézzel lett bemásolva)
+ximea_linux_sp_beta.tgz
+
+# Épített csomagok
+dist/
+build/
+*.egg-info/
