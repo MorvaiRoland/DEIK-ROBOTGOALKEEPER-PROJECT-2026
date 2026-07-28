@@ -381,6 +381,30 @@ class XimeaCamera(BaseCamera):
             except Exception as exc:
                 logger.warning("Erősítés beállítási hiba: %s", exc)
 
+    def set_awb(self, enabled: bool) -> None:
+        """Beállítja az automatikus fehéregyensúlyt valós időben."""
+        if self._cam and self._is_open:
+            try:
+                if enabled:
+                    self._cam.enable_auto_wb()
+                    logger.debug("AWB bekapcsolva (%s)", self._info.name)
+                else:
+                    self._cam.disable_auto_wb()
+                    logger.debug("AWB kikapcsolva (%s)", self._info.name)
+            except Exception as exc:
+                logger.warning("AWB beállítási hiba: %s", exc)
+
+    def set_wb(self, kr: float, kg: float, kb: float) -> None:
+        """Beállítja a manuális fehéregyensúlyt valós időben."""
+        if self._cam and self._is_open:
+            try:
+                self._cam.set_wb_kr(kr)
+                self._cam.set_wb_kg(kg)
+                self._cam.set_wb_kb(kb)
+                logger.debug("WB beállítva: R=%.2f G=%.2f B=%.2f (%s)", kr, kg, kb, self._info.name)
+            except Exception as exc:
+                logger.warning("WB beállítási hiba: %s", exc)
+
     def get_fps(self) -> float:
         """Visszaadja a mért valódi frame rate-t (EMA simítással)."""
         return self._measured_fps

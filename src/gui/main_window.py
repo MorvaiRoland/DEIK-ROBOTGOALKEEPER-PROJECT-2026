@@ -19,6 +19,8 @@ Feldolgozási pipeline (háttérszálon):
 import logging
 import sys
 import time
+import json
+import os
 from typing import Any, Dict, Optional
 
 import cv2
@@ -35,7 +37,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton,
     QSizePolicy, QSpinBox, QStatusBar, QTabWidget,
-    QToolBar, QVBoxLayout, QWidget
+    QToolBar, QVBoxLayout, QWidget, QSlider, QDoubleSpinBox
 )
 
 from camera.camera_manager import CameraManager, StereoPair
@@ -124,6 +126,26 @@ class TrackerWorker(QThread):
     def stop(self) -> None:
         """Kéri a szál leállítását (graceful shutdown)."""
         self._running = False
+
+    @pyqtSlot(bool, int)
+    def set_camera_exposure(self, is_left: bool, exposure_us: int) -> None:
+        if self._cam_manager:
+            self._cam_manager.set_camera_exposure(is_left, exposure_us)
+
+    @pyqtSlot(bool, float)
+    def set_camera_gain(self, is_left: bool, gain_db: float) -> None:
+        if self._cam_manager:
+            self._cam_manager.set_camera_gain(is_left, gain_db)
+
+    @pyqtSlot(bool, bool)
+    def set_camera_awb(self, is_left: bool, enabled: bool) -> None:
+        if self._cam_manager:
+            self._cam_manager.set_camera_awb(is_left, enabled)
+
+    @pyqtSlot(bool, float, float, float)
+    def set_camera_wb(self, is_left: bool, kr: float, kg: float, kb: float) -> None:
+        if self._cam_manager:
+            self._cam_manager.set_camera_wb(is_left, kr, kg, kb)
 
     def run(self) -> None:
         """
@@ -301,6 +323,7 @@ class MainWindow(QMainWindow):
     def __init__(self, config: dict):
         super().__init__()
         self._config = config
+        self._load_gui_settings()
         self._worker: Optional[TrackerWorker] = None
         self._is_running = False
 
@@ -335,6 +358,7 @@ class MainWindow(QMainWindow):
         """Megépíti a teljes GUI struktúrát."""
         self._build_toolbar()
         self._build_central_widget()
+        self._build_camera_settings_dock()
         self._build_stats_dock()
         self._build_log_dock()
         self._build_status_bar()
@@ -472,6 +496,134 @@ class MainWindow(QMainWindow):
 
         bottom_layout.addWidget(pos_group, stretch=1)
         main_layout.addLayout(bottom_layout, stretch=2)
+
+    def _build_camera_settings_dock(self) -> None:
+        """Kamera beállítások lebegő panel létrehozása."""
+        dock = QDockWidget("Kamera Beállítások", self)
+        dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+
+        tabs = QTabWidget()
+        
+        # --- Bal kamera tab ---
+        left_tab = QWidget()
+        left_layout = QFormLayout(left_tab)
+        
+        # Exposure
+        self._exp_l = QSlider(Qt.Orientation.Horizontal)
+        self._exp_l.setRange(100, 10000)
+        self._exp_l.setValue(self._config["camera"].get("left", {}).get("exposure_time_us", self._config["camera"].get("exposure_time_us", 3000)))
+        self._exp_lbl_l = QLabel(f"{self._exp_l.value()} us")
+        self._exp_l.valueChanged.connect(lambda v: self._exp_lbl_l.setText(f"{v} us"))
+        self._exp_l.valueChanged.connect(lambda v: self._worker.set_camera_exposure(True, v) if self._worker else None)
+        
+        # Gain
+        self._gain_l = QDoubleSpinBox()
+        self._gain_l.setRange(0.0, 15.0)
+        self._gain_l.setSingleStep(0.5)
+        self._gain_l.setValue(self._config["camera"].get("left", {}).get("gain_db", self._config["camera"].get("gain_db", 0.0)))
+        self._gain_l.valueChanged.connect(lambda v: self._worker.set_camera_gain(True, v) if self._worker else None)
+        
+        # AWB
+        self._awb_l = QCheckBox("Automatikus (AWB)")
+        self._awb_l.setChecked(self._config["camera"].get("left", {}).get("auto_white_balance", self._config["camera"].get("auto_white_balance", True)))
+        self._awb_l.toggled.connect(lambda v: self._worker.set_camera_awb(True, v) if self._worker else None)
+        
+        left_layout.addRow("Záridő:", self._exp_lbl_l)
+        left_layout.addRow("", self._exp_l)
+        left_layout.addRow("Erősítés (dB):", self._gain_l)
+        left_layout.addRow("Fehéregy.:", self._awb_l)
+        tabs.addTab(left_tab, "Bal")
+
+        # --- Jobb kamera tab ---
+        right_tab = QWidget()
+        right_layout = QFormLayout(right_tab)
+        
+        # Exposure
+        self._exp_r = QSlider(Qt.Orientation.Horizontal)
+        self._exp_r.setRange(100, 10000)
+        self._exp_r.setValue(self._config["camera"].get("right", {}).get("exposure_time_us", self._config["camera"].get("exposure_time_us", 3000)))
+        self._exp_lbl_r = QLabel(f"{self._exp_r.value()} us")
+        self._exp_r.valueChanged.connect(lambda v: self._exp_lbl_r.setText(f"{v} us"))
+        self._exp_r.valueChanged.connect(lambda v: self._worker.set_camera_exposure(False, v) if self._worker else None)
+        
+        # Gain
+        self._gain_r = QDoubleSpinBox()
+        self._gain_r.setRange(0.0, 15.0)
+        self._gain_r.setSingleStep(0.5)
+        self._gain_r.setValue(self._config["camera"].get("right", {}).get("gain_db", self._config["camera"].get("gain_db", 0.0)))
+        self._gain_r.valueChanged.connect(lambda v: self._worker.set_camera_gain(False, v) if self._worker else None)
+        
+        # AWB
+        self._awb_r = QCheckBox("Automatikus (AWB)")
+        self._awb_r.setChecked(self._config["camera"].get("right", {}).get("auto_white_balance", self._config["camera"].get("auto_white_balance", True)))
+        self._awb_r.toggled.connect(lambda v: self._worker.set_camera_awb(False, v) if self._worker else None)
+        
+        right_layout.addRow("Záridő:", self._exp_lbl_r)
+        right_layout.addRow("", self._exp_r)
+        right_layout.addRow("Erősítés (dB):", self._gain_r)
+        right_layout.addRow("Fehéregy.:", self._awb_r)
+        tabs.addTab(right_tab, "Jobb")
+
+        dock_layout = QVBoxLayout()
+        dock_layout.addWidget(tabs)
+        
+        self._btn_save_settings = QPushButton("💾 Beállítások Mentése")
+        self._btn_save_settings.setStyleSheet(
+            "QPushButton { background-color: #3d3d4d; color: #cdd6f4; font-weight: bold; padding: 8px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #555; }"
+        )
+        self._btn_save_settings.clicked.connect(self._save_gui_settings)
+        dock_layout.addWidget(self._btn_save_settings)
+        
+        container = QWidget()
+        container.setLayout(dock_layout)
+        dock.setWidget(container)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+
+    def _load_gui_settings(self) -> None:
+        """Betölti az elmentett GUI kamera beállításokat."""
+        path = "config/gui_settings.json"
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    gui_cfg = json.load(f)
+                if "left" in gui_cfg:
+                    if "left" not in self._config["camera"]:
+                        self._config["camera"]["left"] = {}
+                    self._config["camera"]["left"].update(gui_cfg["left"])
+                if "right" in gui_cfg:
+                    if "right" not in self._config["camera"]:
+                        self._config["camera"]["right"] = {}
+                    self._config["camera"]["right"].update(gui_cfg["right"])
+                logger.info("Mentett GUI kamera beállítások betöltve.")
+            except Exception as e:
+                logger.error("GUI beállítások betöltése sikertelen: %s", e)
+
+    @pyqtSlot()
+    def _save_gui_settings(self) -> None:
+        """Elmenti az aktuális kamera beállításokat."""
+        gui_cfg = {
+            "left": {
+                "exposure_time_us": self._exp_l.value(),
+                "gain_db": self._gain_l.value(),
+                "auto_white_balance": self._awb_l.isChecked()
+            },
+            "right": {
+                "exposure_time_us": self._exp_r.value(),
+                "gain_db": self._gain_r.value(),
+                "auto_white_balance": self._awb_r.isChecked()
+            }
+        }
+        try:
+            os.makedirs("config", exist_ok=True)
+            with open("config/gui_settings.json", "w") as f:
+                json.dump(gui_cfg, f, indent=4)
+            logger.info("GUI kamera beállítások sikeresen mentve (config/gui_settings.json).")
+            QMessageBox.information(self, "Mentés Sikeres", "A kamera beállítások sikeresen elmentve!\nKövetkező indításnál ezek az értékek töltődnek be.")
+        except Exception as e:
+            logger.error("GUI beállítások mentése sikertelen: %s", e)
+            QMessageBox.critical(self, "Mentés Hiba", f"Nem sikerült elmenteni a beállításokat:\n{e}")
 
     def _build_stats_dock(self) -> None:
         """Statisztika lebegő panel létrehozása."""

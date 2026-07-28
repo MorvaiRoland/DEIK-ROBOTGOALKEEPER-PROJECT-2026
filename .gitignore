@@ -66,3 +66,6 @@ ximea_linux_sp_beta.tgz
 dist/
 build/
 *.egg-info/
+
+# Helyi GUI beállítások (ne kerületek verziókövetés alá)
+config/gui_settings.json

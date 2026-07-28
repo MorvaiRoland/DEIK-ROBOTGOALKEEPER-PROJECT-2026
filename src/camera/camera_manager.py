@@ -235,12 +235,19 @@ class CameraManager:
         if cam_type == "ximea":
             # Ximea index: 0 = bal, 1 = jobb
             index = 0 if is_left else 1
-            sn = self._cam_config.get("serial_number_left") if is_left else self._cam_config.get("serial_number_right")
+            cam_specific = self._cam_config.get("left", {}) if is_left else self._cam_config.get("right", {})
+            merged_config = self._cam_config.copy()
+            merged_config.update(cam_specific)
+            
+            sn = merged_config.get("serial_number")
+            if not sn:
+                sn = self._cam_config.get("serial_number_left") if is_left else self._cam_config.get("serial_number_right")
+                
             logger.info("Ximea kamera létrehozása (%s, index=%d, sn=%s)", side, index, sn)
             return XimeaCamera(
                 camera_index=index,
                 is_left=is_left,
-                config=self._cam_config,
+                config=merged_config,
                 serial_number=sn,
             )
 
@@ -306,6 +313,30 @@ class CameraManager:
             "pair_count": self._pair_count,
             "is_open": self._is_open,
         }
+
+    # ------------------------------------------------------------------
+    # Kamera valós idejű vezérlése
+    # ------------------------------------------------------------------
+
+    def set_camera_exposure(self, is_left: bool, exposure_us: int) -> None:
+        cam = self._cam_left if is_left else self._cam_right
+        if cam and hasattr(cam, "set_exposure"):
+            cam.set_exposure(exposure_us)
+
+    def set_camera_gain(self, is_left: bool, gain_db: float) -> None:
+        cam = self._cam_left if is_left else self._cam_right
+        if cam and hasattr(cam, "set_gain"):
+            cam.set_gain(gain_db)
+
+    def set_camera_awb(self, is_left: bool, enabled: bool) -> None:
+        cam = self._cam_left if is_left else self._cam_right
+        if cam and hasattr(cam, "set_awb"):
+            cam.set_awb(enabled)
+
+    def set_camera_wb(self, is_left: bool, kr: float, kg: float, kb: float) -> None:
+        cam = self._cam_left if is_left else self._cam_right
+        if cam and hasattr(cam, "set_wb"):
+            cam.set_wb(kr, kg, kb)
 
     # ------------------------------------------------------------------
     # Context manager támogatás

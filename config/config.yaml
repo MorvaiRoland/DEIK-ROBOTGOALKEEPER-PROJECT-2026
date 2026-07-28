@@ -50,15 +50,35 @@ camera:
   # USB 3.0: ~400 MB/s max → kameránként 160-180 MB/s biztonságos
   bandwidth_limit_mbs: 160
 
-  # Ximea gyári sorozatszámok (Serial Number) a két kamerához
+  # Ximea gyári sorozatszámok (visszafelé kompatibilitás)
   serial_number_left: "CACAU2546000"
   serial_number_right: "CACAU2517001"
 
-  # Fehéregyensúly (White Balance) – megszünteti a nyers Bayer szenzor zöldes árnyalatát
+  # Alapértelmezett fehéregyensúly (White Balance)
   auto_white_balance: true
   wb_kr: 1.8   # Piros erősítés (ha auto_white_balance: false)
   wb_kg: 1.0   # Zöld erősítés
   wb_kb: 2.1   # Kék erősítés
+
+  # ----- Egyedi beállítások a BAL kamerára -----
+  left:
+    serial_number: "CACAU2546000"
+    exposure_time_us: 3000
+    gain_db: 0.0
+    auto_white_balance: true
+    wb_kr: 1.8
+    wb_kg: 1.0
+    wb_kb: 2.1
+
+  # ----- Egyedi beállítások a JOBB kamerára -----
+  right:
+    serial_number: "CACAU2517001"
+    exposure_time_us: 3000
+    gain_db: 0.0
+    auto_white_balance: true
+    wb_kr: 1.8
+    wb_kg: 1.0
+    wb_kb: 2.1
 
   # Mock kamera videófájlok (csak type="mock" esetén)
   mock:
