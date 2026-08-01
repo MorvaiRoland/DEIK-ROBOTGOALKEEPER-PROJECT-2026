@@ -17,6 +17,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
+# pyrefly: ignore [missing-import]
+import cv2
 import numpy as np
 
 # Modul szintű napló
@@ -84,6 +86,20 @@ class BaseCamera(ABC):
         self._info = info
         self._is_open = False
         self._frame_count = 0
+
+        # Kép transzformációs és beállítási paraméterek
+        self._offset_x: int = 0
+        self._offset_y: int = 0
+        self._flip_h: bool = False
+        self._flip_v: bool = False
+        self._rotation: int = 0
+        self._exposure_us: int = 3000
+        self._gain_db: float = 0.0
+        self._auto_wb: bool = True
+        self._wb_kr: float = 1.8
+        self._wb_kg: float = 1.0
+        self._wb_kb: float = 2.1
+
         logger.debug("Kamera objektum létrehozva: %s", info.name)
 
     # ------------------------------------------------------------------
@@ -145,6 +161,78 @@ class BaseCamera(ABC):
             Mért FPS (frame per másodperc)
         """
         ...
+
+    # ------------------------------------------------------------------
+    # Kép elmozdulás (X/Y offset) és transzformációk
+    # ------------------------------------------------------------------
+
+    def set_offset(self, offset_x: int, offset_y: int) -> None:
+        """Beállítja a kép X és Y tengely menti elmozdulását pixelben."""
+        self._offset_x = int(offset_x)
+        self._offset_y = int(offset_y)
+        logger.debug("Offset beállítva: X=%d, Y=%d (%s)", self._offset_x, self._offset_y, self._info.name)
+
+    def set_flip(self, flip_h: bool, flip_v: bool) -> None:
+        """Beállítja a vízszintes és függőleges tükrözést."""
+        self._flip_h = bool(flip_h)
+        self._flip_v = bool(flip_v)
+
+    def set_rotation(self, rotation: int) -> None:
+        """Beállítja a kép elforgatását fokban (0, 90, 180, 270)."""
+        if rotation in (0, 90, 180, 270):
+            self._rotation = rotation
+
+    def set_awb(self, enabled: bool) -> None:
+        """Beállítja az automatikus fehéregyensúlyt."""
+        self._auto_wb = bool(enabled)
+
+    def set_wb(self, kr: float, kg: float, kb: float) -> None:
+        """Beállítja a manuális fehéregyensúly RGB erősítéseit."""
+        self._wb_kr = float(kr)
+        self._wb_kg = float(kg)
+        self._wb_kb = float(kb)
+
+    def apply_image_transformations(self, image: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """
+        Alkalmazza a beállított X/Y elmozdulást, tükrözést és forgatást a képre.
+
+        Args:
+            image: BGR NumPy kép vagy None
+
+        Returns:
+            Transzformált BGR NumPy kép
+        """
+        if image is None:
+            return None
+
+        h, w = image.shape[:2]
+
+        # 1. X / Y elmozdulás (Offset / Shift) az X és Y tengelyen
+        if self._offset_x != 0 or self._offset_y != 0:
+            M = np.float32([[1, 0, self._offset_x], [0, 1, self._offset_y]])
+            image = cv2.warpAffine(
+                image, M, (w, h),
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(0, 0, 0)
+            )
+
+        # 2. Tükrözések
+        if self._flip_h and self._flip_v:
+            image = cv2.flip(image, -1)
+        elif self._flip_h:
+            image = cv2.flip(image, 1)
+        elif self._flip_v:
+            image = cv2.flip(image, 0)
+
+        # 3. Forgatás
+        if self._rotation == 90:
+            image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        elif self._rotation == 180:
+            image = cv2.rotate(image, cv2.ROTATE_180)
+        elif self._rotation == 270:
+            image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        return image
 
     # ------------------------------------------------------------------
     # Opcionális metódusok – alapértelmezett implementációval
@@ -214,3 +302,4 @@ class BaseCamera(ABC):
             f"fps={self._info.fps}, "
             f"status={status})"
         )
+

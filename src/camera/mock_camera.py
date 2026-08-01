@@ -20,6 +20,7 @@ import logging
 import time
 from typing import Optional, Union
 
+# pyrefly: ignore [missing-import]
 import cv2
 import numpy as np
 
@@ -83,8 +84,16 @@ class MockCamera(BaseCamera):
         self._fps_start_time: float = 0.0
         self._measured_fps: float = 0.0
 
+        # Kezdő offset és transzformációs értékek betöltése a konfigból
+        self._offset_x = int(config.get("offset_x", 0))
+        self._offset_y = int(config.get("offset_y", 0))
+        self._flip_h = bool(config.get("flip_h", False))
+        self._flip_v = bool(config.get("flip_v", False))
+        self._rotation = int(config.get("rotation", 0))
+
         logger.info("MockCamera létrehozva: forrás='%s', %dx%d @ %.0f FPS",
                     source, target_w, target_h, target_fps)
+
 
     def open(self) -> bool:
         """
@@ -181,8 +190,12 @@ class MockCamera(BaseCamera):
 
     def _make_frame(self, image: np.ndarray) -> CameraFrame:
         """Létrehoz egy CameraFrame objektumot a mért FPS-sel."""
+        # Alkalmazzuk az X/Y elmozdulást, tükrözést és elforgatást
+        image = self.apply_image_transformations(image)
+
         # FPS mérés (minden 30 frame-enként)
         self._fps_counter += 1
+
         if self._fps_counter >= 30:
             elapsed = time.perf_counter() - self._fps_start_time
             self._measured_fps = self._fps_counter / elapsed
