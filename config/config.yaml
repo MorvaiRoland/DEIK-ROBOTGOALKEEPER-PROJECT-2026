@@ -12,9 +12,10 @@
 #   Z tengely: mélység (kapu → pályára pozitív)  [mm]
 #
 # GEOMETRIA:
-#   Bal kamera:  X = -2450 mm, Y = 2800 mm, Z = 0 mm
-#   Jobb kamera: X = +2450 mm, Y = 2800 mm, Z = 0 mm
+#   Bal kamera:  X = -1100 mm, Y = 2900 mm, Z = 0 mm
+#   Jobb kamera: X = +1100 mm, Y = 2900 mm, Z = 0 mm
 #   Kapu: X = [-2000, +2000] mm, Y = [0, 2000] mm, Z = 0 mm
+#   Baseline (kamerák közötti táv): 2200 mm
 #   Lövőtávolság: Z = 8000 mm
 # =============================================================================
 
@@ -116,15 +117,15 @@ geometry:
 
   # ----- Sztereó elrendezés -----
   # Kamerák X pozíciója a kapu közepétől:
-  left_camera_x_mm: -2450.0   # Bal kamera (negatív X)
-  right_camera_x_mm: 2450.0   # Jobb kamera (pozitív X)
+  left_camera_x_mm: -1100.0   # Bal kamera: 1100 mm-re a kapu közepétől (negatív X)
+  right_camera_x_mm: 1100.0   # Jobb kamera: 1100 mm-re a kapu közepétől (pozitív X)
 
   # Baseline = a két kamera közötti vízszintes távolság
-  # baseline = 2 × 2450 = 4900 mm
-  baseline_mm: 4900.0
+  # baseline = 2 × 1100 = 2200 mm
+  baseline_mm: 2200.0
 
   # Kamerák magassága a talajtól
-  camera_height_mm: 2800.0
+  camera_height_mm: 2900.0
 
   # Kamerák Z pozíciója (kapu síkjától mért távolság)
   # 0 = pontosan a kapuvonalon vannak
@@ -147,10 +148,11 @@ stereo:
   calibration_file: "data/calibration/stereo_calibration.npz"
 
   # Kalibráláshoz használt sakktábla paraméterei
-  # FONTOS: a belső sarkok száma (nem a négyzetek száma!)
+  # A nyomtatott tábla: 9×7 négyzet → OpenCV belső sarokpontok: 8×6
+  # (belső sarkok száma = négyzetek száma - 1 per tengely)
   chessboard:
-    inner_corners_x: 9      # Vízszintes belső sarokpontok száma
-    inner_corners_y: 6      # Függőleges belső sarokpontok száma
+    inner_corners_x: 8      # Vízszintes belső sarokpontok száma (9 négyzet - 1)
+    inner_corners_y: 6      # Függőleges belső sarokpontok száma (7 négyzet - 1)
     square_size_mm: 30.0    # Sakktábla négyzetének fizikai mérete mm-ben
 
   # Minimum szükséges kalibrálási képpár (pontossághoz min. 20 ajánlott)

@@ -29,12 +29,12 @@ import psutil
 # pyrefly: ignore [missing-import]
 # type: ignore
 from PyQt6.QtCore import (
-    QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
+    QObject, QPoint, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
 )
 # pyrefly: ignore [missing-import]
 # type: ignore
 from PyQt6.QtGui import (
-    QColor, QFont, QIcon, QImage, QKeySequence, QPixmap, QShortcut, QTextCursor
+    QColor, QFont, QIcon, QImage, QKeySequence, QPixmap, QShortcut, QTextCursor, QWheelEvent
 )
 # pyrefly: ignore [missing-import]
 # type: ignore
@@ -52,6 +52,7 @@ from detection.kalman_tracker import KalmanTracker2D
 from stereo.triangulator import StereoTriangulator
 from prediction.trajectory_predictor import TrajectoryPredictor, ImpactPrediction
 from gui.goal_view import GoalViewWidget
+from gui.calibration_dialog import CalibrationDialog
 from gui.theme import (
     LIGHT_DEIK_QSS, get_status_pill_style, get_app_icon, COLOR_DEIK_GREEN, COLOR_DEIK_GOLD
 )
@@ -75,6 +76,202 @@ class _QtLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         msg = self.format(record)
         self.signals.log_msg.emit(msg)
+
+
+# --------------------------------------------------------------------------- #
+# Interaktív kamera nézetlabel (zoom + pan)
+# --------------------------------------------------------------------------- #
+
+class ZoomableLabel(QLabel):
+    """
+    QLabel utód, amely egérgörgős zoomot és drag/pan mozgatást valósít meg
+    a kamera képeken. A zoom és pan state a widget-ben tárolódik, és a
+    set_frame() metóduson keresztül frissül a megjelenített kép.
+
+    Kezelők:
+        - wheelEvent:           zoom be/ki (0.25x – 10x)
+        - mousePressEvent:      pan kezdete (bal gomb)
+        - mouseMoveEvent:       pan mozgatás
+        - mouseReleaseEvent:    pan vége
+        - mouseDoubleClickEvent: zoom/pan reset
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._zoom: float = 1.0
+        self._pan_x: float = 0.0   # relatív, 0.0–1.0 tartomány (kép-koordinátában)
+        self._pan_y: float = 0.0
+        self._dragging: bool = False
+        self._drag_start: QPoint = QPoint()
+        self._drag_pan_start_x: float = 0.0
+        self._drag_pan_start_y: float = 0.0
+        self._current_frame: Optional[np.ndarray] = None
+
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    # ------------------------------------------------------------------
+    # Nyilvános API
+    # ------------------------------------------------------------------
+
+    def set_frame(self, frame: np.ndarray) -> None:
+        """Beállítja az aktuális képkockát és frissíti a megjelenítést."""
+        self._current_frame = frame
+        self._render()
+
+    def reset_zoom(self) -> None:
+        """Visszaállítja a zoom és pan értékeket az alapértelmezésre."""
+        self._zoom = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._render()
+
+    @property
+    def zoom_level(self) -> float:
+        return self._zoom
+
+    # ------------------------------------------------------------------
+    # Eseménykezelők
+    # ------------------------------------------------------------------
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Egérgörgős zoom – az egér pozíciójára fókuszálva."""
+        if self._current_frame is None:
+            return
+
+        delta = event.angleDelta().y()
+        factor = 1.15 if delta > 0 else (1.0 / 1.15)
+        new_zoom = max(0.25, min(10.0, self._zoom * factor))
+
+        # Az egér kép-koordinátáihoz igazítjuk a pan-t, hogy a kurzor "helyen maradjon"
+        w_lbl = max(self.width(), 1)
+        h_lbl = max(self.height(), 1)
+        mpos = event.position()
+        mx_rel = mpos.x() / w_lbl   # 0..1
+        my_rel = mpos.y() / h_lbl
+
+        # Zoom előtti viewport szélesség/magasság (kép-arányban)
+        vw_old = 1.0 / self._zoom
+        vh_old = 1.0 / self._zoom
+        vw_new = 1.0 / new_zoom
+        vh_new = 1.0 / new_zoom
+
+        # Pan korrekció, hogy az egér alatt lévő pont helyen maradjon
+        self._pan_x += (mx_rel - 0.5) * (vw_old - vw_new)
+        self._pan_y += (my_rel - 0.5) * (vh_old - vh_new)
+
+        self._zoom = new_zoom
+        self._clamp_pan()
+        self._render()
+        event.accept()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._zoom > 1.001:
+            self._dragging = True
+            self._drag_start = event.pos()
+            self._drag_pan_start_x = self._pan_x
+            self._drag_pan_start_y = self._pan_y
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._dragging and self._current_frame is not None:
+            dx = event.pos().x() - self._drag_start.x()
+            dy = event.pos().y() - self._drag_start.y()
+            w_lbl = max(self.width(), 1)
+            h_lbl = max(self.height(), 1)
+            # Konvertálás kép-arányos koordinátákba
+            self._pan_x = self._drag_pan_start_x - dx / w_lbl / self._zoom
+            self._pan_y = self._drag_pan_start_y - dy / h_lbl / self._zoom
+            self._clamp_pan()
+            self._render()
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            cursor = Qt.CursorShape.CrossCursor if self._zoom <= 1.001 else Qt.CursorShape.OpenHandCursor
+            self.setCursor(cursor)
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        """Dupla kattintás: zoom és pan visszaállítása."""
+        self.reset_zoom()
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        event.accept()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._render()
+
+    # ------------------------------------------------------------------
+    # Belső segédfüggvények
+    # ------------------------------------------------------------------
+
+    def _clamp_pan(self) -> None:
+        """Korlátozza a pan értékeket, hogy a kép ne csússzon ki a nézetből."""
+        half = 0.5 / self._zoom
+        self._pan_x = max(-half + 0.5 / self._zoom, min(1.0 - 0.5 / self._zoom - (1.0 / self._zoom - 2 * half), self._pan_x))
+        self._pan_y = max(-half + 0.5 / self._zoom, min(1.0 - 0.5 / self._zoom - (1.0 / self._zoom - 2 * half), self._pan_y))
+        # Egyszerűbb határok: pan ne vihet ki a képből
+        margin = (1.0 - 1.0 / self._zoom) / 2.0
+        self._pan_x = max(-margin, min(margin, self._pan_x))
+        self._pan_y = max(-margin, min(margin, self._pan_y))
+
+    def _render(self) -> None:
+        """Rendereli a képet a jelenlegi zoom/pan beállítások alapján."""
+        if self._current_frame is None:
+            return
+
+        w_lbl = self.width()
+        h_lbl = self.height()
+        if w_lbl <= 0 or h_lbl <= 0:
+            return
+
+        frame = self._current_frame
+        fh, fw = frame.shape[:2]
+
+        if self._zoom <= 1.001 and self._pan_x == 0.0 and self._pan_y == 0.0:
+            # Nincs zoom – egyszerű skálázás
+            cropped = frame
+        else:
+            # Viewport kiszámítása kép-koordinátákban
+            vw = fw / self._zoom          # viewport szélesség pixelben
+            vh = fh / self._zoom          # viewport magasság pixelben
+            cx = (0.5 + self._pan_x) * fw # középpont x
+            cy = (0.5 + self._pan_y) * fh # középpont y
+
+            x1 = int(max(0, cx - vw / 2))
+            y1 = int(max(0, cy - vh / 2))
+            x2 = int(min(fw, cx + vw / 2))
+            y2 = int(min(fh, cy + vh / 2))
+
+            if x2 <= x1 or y2 <= y1:
+                return
+            cropped = frame[y1:y2, x1:x2]
+
+        # Skálázás a label méretére
+        ch = cropped.shape[2] if len(cropped.shape) == 3 else 1
+        q_img = QImage(
+            cropped.data, cropped.shape[1], cropped.shape[0],
+            cropped.shape[1] * ch,
+            QImage.Format.Format_BGR888
+        )
+        pixmap = QPixmap.fromImage(q_img).scaled(
+            w_lbl, h_lbl,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setPixmap(pixmap)
+
+        # Zoom szint felirat
+        if self._zoom > 1.05:
+            overlay_text = f"🔍 {self._zoom:.1f}×"
+            # A pixmap-ra ráírjuk (egyszerű megközelítés: label toolTip)
+            self.setToolTip(f"Zoom: {self._zoom:.1f}×  (dupla kattintás = reset)")
+        else:
+            self.setToolTip("Egérgörgővel zoom | Húzással mozgatás | Dupla katt = reset")
 
 
 # --------------------------------------------------------------------------- #
@@ -403,6 +600,22 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
+        btn_calibrate = QPushButton("⚙  Kalibrálás")
+        btn_calibrate.setFixedHeight(34)
+        btn_calibrate.setStyleSheet(
+            "QPushButton { font-weight: 800; color: #FFFFFF; background-color: #D97706; "
+            "border-radius: 6px; font-size: 12px; border: none; padding: 0 10px; }"
+            "QPushButton:hover { background-color: #B45309; }"
+        )
+        btn_calibrate.setToolTip(
+            "Sztereó kalibrációs munkafolyamat megnyitása\n"
+            "(sakktáblás képpár rögzítés + OpenCV sztereó kalibrálás)"
+        )
+        btn_calibrate.clicked.connect(self._on_open_calibration)
+        toolbar.addWidget(btn_calibrate)
+
+        toolbar.addSeparator()
+
         self._pill_sys = QLabel(" INAKTÍV ")
         self._pill_sys.setStyleSheet(get_status_pill_style("info"))
         toolbar.addWidget(self._pill_sys)
@@ -457,22 +670,22 @@ class MainWindow(QMainWindow):
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
 
-        left_grp = QGroupBox("Bal Kamera  [X = -2450 mm]")
+        left_grp = QGroupBox("Bal Kamera  [X = -1100 mm]")
         l_box = QVBoxLayout(left_grp)
         l_box.setContentsMargins(6, 18, 6, 6)
-        self._cam_label_left = QLabel("Kamera inaktív")
-        self._cam_label_left.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._cam_label_left = ZoomableLabel()
+        self._cam_label_left.setText("Kamera inaktív")
         self._cam_label_left.setStyleSheet("background-color: #F1F5F9; color: #475569; border: 1px solid #CBD5E1; border-radius: 6px;")
         self._cam_label_left.setMinimumSize(320, 220)
         self._cam_label_left.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         l_box.addWidget(self._cam_label_left)
         top_row.addWidget(left_grp, stretch=3)
 
-        right_grp = QGroupBox("Jobb Kamera  [X = +2450 mm]")
+        right_grp = QGroupBox("Jobb Kamera  [X = +1100 mm]")
         r_box = QVBoxLayout(right_grp)
         r_box.setContentsMargins(6, 18, 6, 6)
-        self._cam_label_right = QLabel("Kamera inaktív")
-        self._cam_label_right.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._cam_label_right = ZoomableLabel()
+        self._cam_label_right.setText("Kamera inaktív")
         self._cam_label_right.setStyleSheet("background-color: #F1F5F9; color: #475569; border: 1px solid #CBD5E1; border-radius: 6px;")
         self._cam_label_right.setMinimumSize(320, 220)
         self._cam_label_right.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -546,21 +759,21 @@ class MainWindow(QMainWindow):
         cams_layout.setSpacing(12)
         cams_layout.setContentsMargins(4, 4, 4, 4)
 
-        left_grp_full = QGroupBox("Bal Kamera — Nagyfelbontású Élő Videófolyam  [X = -2450 mm]")
+        left_grp_full = QGroupBox("Bal Kamera — Nagyfelbontású Élő Videófolyam  [X = -1100 mm]")
         lf_box = QVBoxLayout(left_grp_full)
         lf_box.setContentsMargins(8, 20, 8, 8)
-        self._cam_label_left_full = QLabel("Kamera inaktív")
-        self._cam_label_left_full.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._cam_label_left_full = ZoomableLabel()
+        self._cam_label_left_full.setText("Kamera inaktív")
         self._cam_label_left_full.setStyleSheet("background-color: #F1F5F9; color: #475569; border: 1px solid #CBD5E1; border-radius: 8px;")
         self._cam_label_left_full.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         lf_box.addWidget(self._cam_label_left_full)
         cams_layout.addWidget(left_grp_full, stretch=1)
 
-        right_grp_full = QGroupBox("Jobb Kamera — Nagyfelbontású Élő Videófolyam  [X = +2450 mm]")
+        right_grp_full = QGroupBox("Jobb Kamera — Nagyfelbontású Élő Videófolyam  [X = +1100 mm]")
         rf_box = QVBoxLayout(right_grp_full)
         rf_box.setContentsMargins(8, 20, 8, 8)
-        self._cam_label_right_full = QLabel("Kamera inaktív")
-        self._cam_label_right_full.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._cam_label_right_full = ZoomableLabel()
+        self._cam_label_right_full.setText("Kamera inaktív")
         self._cam_label_right_full.setStyleSheet("background-color: #F1F5F9; color: #475569; border: 1px solid #CBD5E1; border-radius: 8px;")
         self._cam_label_right_full.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         rf_box.addWidget(self._cam_label_right_full)
@@ -770,9 +983,17 @@ class MainWindow(QMainWindow):
         h_roi_y.addWidget(QLabel("Max:"))
         h_roi_y.addWidget(spin_ymax)
 
+        chk_roi_zoom = QCheckBox("ROI Zoom – csak a ROI területet mutassa kinagyítva")
+        chk_roi_zoom.setChecked(bool(cam_cfg.get("roi_zoom", False)))
+        chk_roi_zoom.setToolTip(
+            "Ha be van kapcsolva, a kamera nézet kinagyítva mutatja az aktív ROI területet.\n"
+            "Ha ki van kapcsolva, a teljes kép látható egy sárga kerettel jelölt ROI-val."
+        )
+
         roi_layout.addRow("Engedélyezve:", chk_roi)
         roi_layout.addRow("X Tartomány:", h_roi_x)
         roi_layout.addRow("Y Tartomány:", h_roi_y)
+        roi_layout.addRow("Zoom nézet:", chk_roi_zoom)
 
         main_vbox.addWidget(roi_grp)
 
@@ -851,6 +1072,7 @@ class MainWindow(QMainWindow):
             "spin_x": spin_x, "spin_y": spin_y, "slider_x": slider_x, "slider_y": slider_y,
             "chk_roi": chk_roi, "spin_xmin": spin_xmin, "spin_xmax": spin_xmax,
             "spin_ymin": spin_ymin, "spin_ymax": spin_ymax,
+            "chk_roi_zoom": chk_roi_zoom,
             "spin_exp": spin_exp, "spin_gain": spin_gain,
             "chk_fliph": chk_fliph, "chk_flipv": chk_flipv, "combo_rot": combo_rot
         }
@@ -907,6 +1129,10 @@ class MainWindow(QMainWindow):
         chk_fliph.toggled.connect(on_trans_changed)
         chk_flipv.toggled.connect(on_trans_changed)
         combo_rot.currentIndexChanged.connect(on_trans_changed)
+        # ROI zoom: csak konfig frissítés, a megjelenítés _on_frames_ready-ben kezelt
+        chk_roi_zoom.toggled.connect(
+            lambda _: self._config["camera"].setdefault(side, {}).update({"roi_zoom": chk_roi_zoom.isChecked()})
+        )
 
         return tab_widget
 
@@ -1100,6 +1326,29 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     @pyqtSlot()
+    def _on_open_calibration(self) -> None:
+        """Megnyitja a számára tervezett Kalibrációs Munkafolyamat Dialógot."""
+        if self._is_running:
+            reply = QMessageBox.question(
+                self,
+                "Kamera foglalt",
+                "A követő rendszer jelenleg fut.\n"
+                "A kalibrációhoz le kell állítani a követőt (kimeríti a kamerát).\n\n"
+                "Leállítsuk automatikusan, és megnyissuk a kalibrációs menütt?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            self._stop_tracker()
+            # Várjuk meg a leállást
+            import time as _time
+            _time.sleep(0.5)
+
+        dlg = CalibrationDialog(self._config, parent=self)
+        dlg.exec()
+        logger.info("Kalibrációs dialog bezárva.")
+
+    @pyqtSlot()
     def _toggle_fullscreen(self) -> None:
         """Vált a teljes képernyős és az ablakos nézet között (F11 / Esc)."""
         if self.isFullScreen():
@@ -1129,13 +1378,17 @@ class MainWindow(QMainWindow):
         frame_right: np.ndarray,
         stats: dict
     ) -> None:
-        self._display_frame(frame_left, self._cam_label_left)
-        self._display_frame(frame_right, self._cam_label_right)
+        # ROI zoom opció olvasása
+        left_roi_zoom = self._get_roi_zoom_frame(frame_left, "left")
+        right_roi_zoom = self._get_roi_zoom_frame(frame_right, "right")
+
+        self._display_frame(left_roi_zoom, self._cam_label_left)
+        self._display_frame(right_roi_zoom, self._cam_label_right)
 
         if hasattr(self, "_cam_label_left_full") and self._cam_label_left_full:
-            self._display_frame(frame_left, self._cam_label_left_full)
+            self._display_frame(left_roi_zoom, self._cam_label_left_full)
         if hasattr(self, "_cam_label_right_full") and self._cam_label_right_full:
-            self._display_frame(frame_right, self._cam_label_right_full)
+            self._display_frame(right_roi_zoom, self._cam_label_right_full)
 
         if stats["pos_valid"]:
             self._lbl_x.setText(f"{stats['x_3d']:+.1f}")
@@ -1279,6 +1532,7 @@ class MainWindow(QMainWindow):
                     "roi_x_max": w["spin_xmax"].value(),
                     "roi_y_min": w["spin_ymin"].value(),
                     "roi_y_max": w["spin_ymax"].value(),
+                    "roi_zoom": w["chk_roi_zoom"].isChecked(),
                     "exposure_time_us": w["spin_exp"].value(),
                     "gain_db": w["spin_gain"].value(),
                     "flip_h": w["chk_fliph"].isChecked(),
@@ -1315,6 +1569,7 @@ class MainWindow(QMainWindow):
                     w["spin_xmax"].setValue(100)
                     w["spin_ymin"].setValue(10)
                     w["spin_ymax"].setValue(90)
+                    w["chk_roi_zoom"].setChecked(False)
                     w["spin_exp"].setValue(3000)
                     w["spin_gain"].setValue(0.0)
                     w["chk_fliph"].setChecked(False)
@@ -1344,19 +1599,45 @@ class MainWindow(QMainWindow):
             self._worker.wait(5000)
             self._worker = None
 
-    def _display_frame(self, frame: np.ndarray, label: QLabel) -> None:
-        h, w, ch = frame.shape
-        bytes_per_line = ch * w
-        q_img = QImage(
-            frame.data, w, h, bytes_per_line,
-            QImage.Format.Format_BGR888
+    def _display_frame(self, frame: np.ndarray, label: "ZoomableLabel") -> None:
+        """Átadja a frame-et a ZoomableLabel-nek megjelenítésre (zoom/pan megőrződik)."""
+        label.set_frame(frame)
+
+    def _get_roi_zoom_frame(self, frame: np.ndarray, side: str) -> np.ndarray:
+        """
+        Ha a ROI Zoom aktív (checkbox be van kapcsolva) és a ROI engedélyezett,
+        kivágja a ROI területet a képből, és azt adja vissza megjelenítésre.
+        Különben az eredeti (teljes) képet adja vissza.
+        """
+        if not hasattr(self, "_cam_widgets") or side not in self._cam_widgets:
+            return frame
+        w = self._cam_widgets[side]
+        if not w["chk_roi_zoom"].isChecked() or not w["chk_roi"].isChecked():
+            return frame
+
+        # ROI koordináták kiszámítása
+        fh, fw = frame.shape[:2]
+        xmin_rel = w["spin_xmin"].value() / 100.0
+        xmax_rel = w["spin_xmax"].value() / 100.0
+        ymin_rel = w["spin_ymin"].value() / 100.0
+        ymax_rel = w["spin_ymax"].value() / 100.0
+
+        x1 = max(0, int(fw * xmin_rel))
+        x2 = min(fw, int(fw * xmax_rel))
+        y1 = max(0, int(fh * ymin_rel))
+        y2 = min(fh, int(fh * ymax_rel))
+
+        if x2 <= x1 or y2 <= y1:
+            return frame
+
+        cropped = frame[y1:y2, x1:x2].copy()
+        # ROI ZOOM felirat rárajzolása
+        cv2.putText(
+            cropped, "ROI ZOOM",
+            (6, min(22, cropped.shape[0] - 4)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
         )
-        pixmap = QPixmap.fromImage(q_img).scaled(
-            label.width(), label.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        label.setPixmap(pixmap)
+        return cropped
 
     def _setup_log_handler(self) -> None:
         self._qt_log_handler = _QtLogHandler()
