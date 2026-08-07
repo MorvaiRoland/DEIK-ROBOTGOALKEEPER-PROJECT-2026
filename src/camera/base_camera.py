@@ -207,6 +207,16 @@ class BaseCamera(ABC):
 
         h, w = image.shape[:2]
 
+        # 0. Szoftveres záridő / erősítés szimuláció (Mock / OpenCV kamera esetén)
+        if not hasattr(self, "_cam") or self._cam is None:
+            exp_us = getattr(self, "_exposure_us", 3000)
+            gain_db = getattr(self, "_gain_db", 0.0)
+            exp_ratio = exp_us / 3000.0
+            gain_scale = 10.0 ** (gain_db / 20.0)
+            total_alpha = exp_ratio * gain_scale
+            if abs(total_alpha - 1.0) > 0.01:
+                image = cv2.convertScaleAbs(image, alpha=total_alpha)
+
         # 1. X / Y elmozdulás (Offset / Shift) az X és Y tengelyen
         if self._offset_x != 0 or self._offset_y != 0:
             M = np.float32([[1, 0, self._offset_x], [0, 1, self._offset_y]])

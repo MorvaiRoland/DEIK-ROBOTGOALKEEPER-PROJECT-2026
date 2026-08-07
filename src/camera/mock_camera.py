@@ -84,12 +84,14 @@ class MockCamera(BaseCamera):
         self._fps_start_time: float = 0.0
         self._measured_fps: float = 0.0
 
-        # Kezdő offset és transzformációs értékek betöltése a konfigból
+        # Kezdő offset, transzformációs és záridő/erősítés értékek betöltése a konfigból
         self._offset_x = int(config.get("offset_x", 0))
         self._offset_y = int(config.get("offset_y", 0))
         self._flip_h = bool(config.get("flip_h", False))
         self._flip_v = bool(config.get("flip_v", False))
         self._rotation = int(config.get("rotation", 0))
+        self._exposure_us = int(config.get("exposure_time_us", 3000))
+        self._gain_db = float(config.get("gain_db", 0.0))
 
         logger.info("MockCamera létrehozva: forrás='%s', %dx%d @ %.0f FPS",
                     source, target_w, target_h, target_fps)
@@ -255,11 +257,13 @@ class MockCamera(BaseCamera):
         return frame
 
     def set_exposure(self, exposure_us: int) -> None:
-        """Szimulált – nincs valódi hatása a webcamera expozíciójára."""
+        """Szimulált – szoftveres fényerő átméretezés."""
+        self._exposure_us = int(exposure_us)
         logger.debug("MockCamera: set_exposure(%d µs) – szimulált", exposure_us)
 
     def set_gain(self, gain_db: float) -> None:
-        """Szimulált – nincs valódi hatása."""
+        """Szimulált – szoftveres erősítés átméretezés."""
+        self._gain_db = float(gain_db)
         logger.debug("MockCamera: set_gain(%.1f dB) – szimulált", gain_db)
 
     def get_fps(self) -> float:

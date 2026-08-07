@@ -249,12 +249,12 @@ class ZoomableLabel(QLabel):
 
             if x2 <= x1 or y2 <= y1:
                 return
-            cropped = frame[y1:y2, x1:x2]
+            cropped = np.ascontiguousarray(frame[y1:y2, x1:x2])
 
         # Skálázás a label méretére
         ch = cropped.shape[2] if len(cropped.shape) == 3 else 1
         q_img = QImage(
-            cropped.data, cropped.shape[1], cropped.shape[0],
+            bytes(cropped.data), cropped.shape[1], cropped.shape[0],
             cropped.shape[1] * ch,
             QImage.Format.Format_BGR888
         )
@@ -1344,6 +1344,9 @@ class MainWindow(QMainWindow):
             import time as _time
             _time.sleep(0.5)
 
+        # Szinkronizáljuk a főoldali GUI-ban beállított kamera paramétereket a konfigba
+        self._sync_config_from_ui()
+
         dlg = CalibrationDialog(self._config, parent=self)
         dlg.exec()
         logger.info("Kalibrációs dialog bezárva.")
@@ -1501,6 +1504,29 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logger.debug("Hardware stats update error: %s", e)
 
+    def _sync_config_from_ui(self) -> None:
+        """Frissíti a belső self._config szótárt a főoldali GUI vezérlők aktuális értékeivel."""
+        for side in ["left", "right"]:
+            if hasattr(self, "_cam_widgets") and side in self._cam_widgets:
+                w = self._cam_widgets[side]
+                rot_index = w["combo_rot"].currentIndex()
+                rot_val = [0, 90, 180, 270][rot_index] if rot_index < 4 else 0
+
+                cam_dict = self._config.setdefault("camera", {}).setdefault(side, {})
+                cam_dict["offset_x"] = w["spin_x"].value()
+                cam_dict["offset_y"] = w["spin_y"].value()
+                cam_dict["roi_enabled"] = w["chk_roi"].isChecked()
+                cam_dict["roi_x_min"] = w["spin_xmin"].value()
+                cam_dict["roi_x_max"] = w["spin_xmax"].value()
+                cam_dict["roi_y_min"] = w["spin_ymin"].value()
+                cam_dict["roi_y_max"] = w["spin_ymax"].value()
+                cam_dict["roi_zoom"] = w["chk_roi_zoom"].isChecked()
+                cam_dict["exposure_time_us"] = w["spin_exp"].value()
+                cam_dict["gain_db"] = w["spin_gain"].value()
+                cam_dict["flip_h"] = w["chk_fliph"].isChecked()
+                cam_dict["flip_v"] = w["chk_flipv"].isChecked()
+                cam_dict["rotation"] = rot_val
+
     def _load_gui_settings(self) -> None:
         path = "config/gui_settings.json"
         if os.path.exists(path):
@@ -1517,31 +1543,11 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _save_gui_settings(self) -> None:
+        self._sync_config_from_ui()
         gui_cfg = {}
         for side in ["left", "right"]:
-            if hasattr(self, "_cam_widgets") and side in self._cam_widgets:
-                w = self._cam_widgets[side]
-                rot_index = w["combo_rot"].currentIndex()
-                rot_val = [0, 90, 180, 270][rot_index] if rot_index < 4 else 0
-
-                gui_cfg[side] = {
-                    "offset_x": w["spin_x"].value(),
-                    "offset_y": w["spin_y"].value(),
-                    "roi_enabled": w["chk_roi"].isChecked(),
-                    "roi_x_min": w["spin_xmin"].value(),
-                    "roi_x_max": w["spin_xmax"].value(),
-                    "roi_y_min": w["spin_ymin"].value(),
-                    "roi_y_max": w["spin_ymax"].value(),
-                    "roi_zoom": w["chk_roi_zoom"].isChecked(),
-                    "exposure_time_us": w["spin_exp"].value(),
-                    "gain_db": w["spin_gain"].value(),
-                    "flip_h": w["chk_fliph"].isChecked(),
-                    "flip_v": w["chk_flipv"].isChecked(),
-                    "rotation": rot_val,
-                }
-                if side not in self._config["camera"]:
-                    self._config["camera"][side] = {}
-                self._config["camera"][side].update(gui_cfg[side])
+            if side in self._config["camera"]:
+                gui_cfg[side] = self._config["camera"][side]
 
         try:
             os.makedirs("config", exist_ok=True)

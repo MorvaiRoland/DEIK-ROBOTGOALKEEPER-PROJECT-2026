@@ -148,12 +148,12 @@ stereo:
   calibration_file: "data/calibration/stereo_calibration.npz"
 
   # Kalibráláshoz használt sakktábla paraméterei
-  # A nyomtatott tábla: 9×7 négyzet → OpenCV belső sarokpontok: 8×6
+  # A nyomtatott tábla: 12×9 négyzet → OpenCV belső sarokpontok: 11×8
   # (belső sarkok száma = négyzetek száma - 1 per tengely)
   chessboard:
-    inner_corners_x: 8      # Vízszintes belső sarokpontok száma (9 négyzet - 1)
-    inner_corners_y: 6      # Függőleges belső sarokpontok száma (7 négyzet - 1)
-    square_size_mm: 30.0    # Sakktábla négyzetének fizikai mérete mm-ben
+    inner_corners_x: 11     # Vízszintes belső sarokpontok száma (12 négyzet - 1)
+    inner_corners_y: 8      # Függőleges belső sarokpontok száma (9 négyzet - 1)
+    square_size_mm: 70.0    # Sakktábla négyzetének fizikai mérete mm-ben (7 cm)
 
   # Minimum szükséges kalibrálási képpár (pontossághoz min. 20 ajánlott)
   min_calibration_frames: 20
