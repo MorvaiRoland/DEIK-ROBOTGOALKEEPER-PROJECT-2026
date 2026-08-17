@@ -174,24 +174,9 @@ class CameraManager:
                 success=False
             )
 
-        # Párhuzamos frame-olvasás (minimális időeltérés)
-        frames = [None, None]
-
-        def _read_left():
-            frames[0] = self._cam_left.read()
-
-        def _read_right():
-            frames[1] = self._cam_right.read()
-
-        t_left = threading.Thread(target=_read_left, daemon=True)
-        t_right = threading.Thread(target=_read_right, daemon=True)
-        t_left.start()
-        t_right.start()
-        t_left.join()
-        t_right.join()
-
-        frame_left: CameraFrame = frames[0]
-        frame_right: CameraFrame = frames[1]
+        # Direct non-blocking frame retrieval from background acquisition buffers
+        frame_left: CameraFrame = self._cam_left.read()
+        frame_right: CameraFrame = self._cam_right.read()
 
         # FPS mérés
         now = time.perf_counter()

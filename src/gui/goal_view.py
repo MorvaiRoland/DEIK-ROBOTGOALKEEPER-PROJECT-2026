@@ -19,7 +19,7 @@ from PyQt6.QtCore import QPointF, QRectF, QTimer, Qt
 # pyrefly: ignore [missing-import]
 # type: ignore
 from PyQt6.QtGui import (
-    QBrush, QColor, QFont, QPainter, QPen, QRadialGradient
+    QBrush, QColor, QFont, QPainter, QPen, QPolygonF, QRadialGradient
 )
 # pyrefly: ignore [missing-import]
 # type: ignore
@@ -69,7 +69,7 @@ class GoalViewWidget(QWidget):
         time_to_impact_s: float,
         in_goal: bool = False,
     ) -> None:
-        if x_mm is not None and time_to_impact_s > 0.0:
+        if x_mm is not None and time_to_impact_s >= 0.0:
             self._impact_x_mm = x_mm
             self._impact_y_mm = y_mm
             self._impact_conf = confidence
@@ -191,6 +191,49 @@ class GoalViewWidget(QWidget):
             painter.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), int(alpha * 0.3))))
             painter.drawEllipse(QPointF(px, py), 5, 5)
 
+    def _draw_yellow_ball_icon(self, painter: QPainter, px: float, py: float, radius: float = 14.0) -> None:
+        """
+        Kirajzol egy látványos sárga focilabda ikont a becsapódási pontra.
+        """
+        # 1. Külső sárga lüktető fényudvar (Pulsing Yellow Glow)
+        glow_r = radius * 2.2 + 3.0 * math.sin(self._anim_phase)
+        glow_grad = QRadialGradient(QPointF(px, py), glow_r)
+        glow_grad.setColorAt(0.0, QColor(254, 240, 138, 220))  # Ragyogó sárga mag
+        glow_grad.setColorAt(0.6, QColor(234, 179, 8, 120))   # Aranysárga közép
+        glow_grad.setColorAt(1.0, QColor(234, 179, 8, 0))     # Átlátszó szél
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(glow_grad))
+        painter.drawEllipse(QPointF(px, py), glow_r, glow_r)
+
+        # 2. Labda teste (Sárga QRadialGradient 3D hatás)
+        ball_grad = QRadialGradient(QPointF(px - radius * 0.3, py - radius * 0.3), radius * 1.5)
+        ball_grad.setColorAt(0.0, QColor("#FEF08A"))  # Csúcsfény
+        ball_grad.setColorAt(0.6, QColor("#FACC15"))  # Élénksárga
+        ball_grad.setColorAt(1.0, QColor("#EAB308"))  # Árnyékos sárga
+
+        painter.setPen(QPen(QColor("#713F12"), 1.8))  # Sötétbarna/arany körvonal
+        painter.setBrush(QBrush(ball_grad))
+        painter.drawEllipse(QPointF(px, py), radius, radius)
+
+        # 3. Focilabda ötszög mintázat (varrás)
+        pen_pattern = QPen(QColor("#451A03"), 1.5)
+        painter.setPen(pen_pattern)
+
+        r_p = radius * 0.42
+        pts_inner = []
+        for k in range(5):
+            angle = -math.pi / 2.0 + k * (2.0 * math.pi / 5.0)
+            pts_inner.append(QPointF(px + r_p * math.cos(angle), py + r_p * math.sin(angle)))
+
+        painter.setBrush(QBrush(QColor("#713F12")))  # Sötétbarna ötszög
+        painter.drawPolygon(QPolygonF(pts_inner))
+
+        for k in range(5):
+            angle = -math.pi / 2.0 + k * (2.0 * math.pi / 5.0)
+            outer_p = QPointF(px + radius * math.cos(angle), py + radius * math.sin(angle))
+            painter.drawLine(pts_inner[k], outer_p)
+
     def _draw_active_target(self, painter: QPainter, goal_rect: QRectF) -> None:
         x, y, w, h = goal_rect.x(), goal_rect.y(), goal_rect.width(), goal_rect.height()
         half_w = self._goal_width_mm / 2.0
@@ -198,31 +241,27 @@ class GoalViewWidget(QWidget):
         px = x + (self._impact_x_mm + half_w) / self._goal_width_mm * w
         py = y + h - (self._impact_y_mm / self._goal_height_mm * h)
 
-        color = QColor("#D97706") if self._in_goal else QColor("#DC2626")
-        pulse_r = 12 + 4 * math.sin(self._anim_phase)
+        # Sárga focilabda ikon kirajzolása
+        self._draw_yellow_ball_icon(painter, px, py, radius=14.0)
 
-        rad_grad = QRadialGradient(QPointF(px, py), pulse_r * 2)
-        rad_grad.setColorAt(0.0, QColor(color.red(), color.green(), color.blue(), 180))
-        rad_grad.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
+        # Célkereszt
+        pen_cross = QPen(QColor("#CA8A04"), 1.2, Qt.PenStyle.DashLine)
+        painter.setPen(pen_cross)
+        painter.drawLine(QPointF(px - 22, py), QPointF(px + 22, py))
+        painter.drawLine(QPointF(px, py - 22), QPointF(px, py + 22))
 
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(rad_grad))
-        painter.drawEllipse(QPointF(px, py), pulse_r * 2, pulse_r * 2)
-
-        painter.setPen(QPen(color, 2))
-        painter.drawEllipse(QPointF(px, py), pulse_r, pulse_r)
-        painter.setBrush(QBrush(QColor("#0F5132")))
-        painter.drawEllipse(QPointF(px, py), 3, 3)
-
+        # Koordináta kártya
         font_txt = QFont("Consolas", 8, QFont.Weight.Bold)
         painter.setFont(font_txt)
-        tag = f"X:{self._impact_x_mm:+.0f} Y:{self._impact_y_mm:.0f}mm ({self._time_to_impact_s:.2f}s)"
+        tag = f"⚽ X:{self._impact_x_mm:+.0f} Y:{self._impact_y_mm:.0f}mm ({self._time_to_impact_s:.2f}s)"
 
-        lbl_r = QRectF(px + 14, py - 10, 160, 20)
+        lbl_r = QRectF(px + 18, py - 12, 175, 22)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor(255, 255, 255, 230)))
-        painter.drawRoundedRect(lbl_r, 4, 4)
-        painter.setPen(QPen(color))
+        painter.setBrush(QBrush(QColor(254, 240, 138, 240)))
+        painter.drawRoundedRect(lbl_r, 5, 5)
+        painter.setPen(QPen(QColor("#854D0E"), 1.5))
+        painter.drawRoundedRect(lbl_r, 5, 5)
+        painter.setPen(QPen(QColor("#713F12")))
         painter.drawText(lbl_r, Qt.AlignmentFlag.AlignCenter, tag)
 
     def _draw_hud_overlay_text(self, painter: QPainter, goal_rect: QRectF, w: int, h: int) -> None:

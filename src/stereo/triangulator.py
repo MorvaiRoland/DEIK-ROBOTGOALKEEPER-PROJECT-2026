@@ -111,17 +111,10 @@ class StereoTriangulator:
         # Kalibrált-e a rendszer?
         self._is_calibrated = False
 
-        # Kapu-koordináta-rendszer origó a kamera rendszerben
-        # A bal kamera az origóban van (a kalibrálás ezt feltételezi)
-        # A kapu közepének pozíciója a bal kamera koordináta-rendszeréhez képest:
-        #   X: +2450 mm (bal kamera jobbra van 2450 mm-el a kapu középtől)
-        #   Y: -2800 mm (kamera 2800 mm-rel feljebb van a talajtól)
-        #   Z: 0 mm     (a kamera és a kapu egy síkban van)
-        self._cam_to_goal_offset = np.array([
-            self._geo_cfg.get("right_camera_x_mm", 2450.0) * 0.0,  # X: bal kamera → kapu közepe
-            -self._geo_cfg.get("camera_height_mm", 2800.0),          # Y: kamera magasság
-            0.0,                                                       # Z: egy síkban
-        ], dtype=np.float64)
+        # Fizikai kamera pozíciók (config-ból, fizikailag mért értékek)
+        self._left_cam_x_mm  = float(self._geo_cfg.get("left_camera_x_mm",  -1070.0))
+        self._cam_height_mm  = float(self._geo_cfg.get("camera_height_mm",   2900.0))
+        self._cam_z_offset_mm = float(self._geo_cfg.get("camera_z_offset_mm", -900.0))
 
     # ------------------------------------------------------------------
     # Kalibrálás betöltése
@@ -330,15 +323,27 @@ class StereoTriangulator:
             logger.debug("triangulate: Z=%.1f mm túl messze (>15m)", Z)
             return None
 
-        # Koordináta-rendszer átalakítás:
-        # A háromszögelés a BAL KAMERA koordináta-rendszerében számol.
+        # ── Koordináta-rendszer átalakítás ─────────────────────────────────
+        # A háromszögelés a BAL KAMERA koordináta-rendszerében számol:
+        #   X_cam: viszszintes (bal kamera optikai tengelytől számolva)
+        #   Y_cam: lefelé pozitív (kamera konvenció)
+        #   Z_cam: a kamera előtt pozitív (mélység)
+        #
         # Konvertálás kapu-koordináta-rendszerbe:
-        #   - A bal kamera X = -2450 mm a kapu közepéhez képest
-        #   - A bal kamera Y = +2800 mm (magasság)
-        #   - A bal kamera Z = 0 (kapu síkja)
-        x_goal = X - self._geo_cfg.get("right_camera_x_mm", 2450.0)  # Bal kamera X offsetje
-        y_goal = -Y + self._geo_cfg.get("camera_height_mm", 2800.0)  # Y tengelyt megfordítjuk
-        z_goal = Z  # Z azonos marad (mélység a kapuhoz képest)
+        #   X_goal = X_cam + left_cam_x_mm
+        #           (bal kamera X = -1070mm a kapu közepétől, tehát: X_cam+(-1070))
+        #   Y_goal = camera_height_mm - Y_cam
+        #           (kamera Y lefelé nő, kapu Y felfelé; talaj = 0)
+        #   Z_goal = Z_cam + camera_z_offset_mm
+        #           (kamera 900mm-rel a gólvonal mögött: Z_cam-900 → Z=0 a gólvonal)
+        x_goal = X + self._left_cam_x_mm            # bal kamera X offsetje
+        y_goal = self._cam_height_mm - Y            # Y megfordítása, talaj=0
+        z_goal = Z + self._cam_z_offset_mm          # Z offset: gólvonal = 0
+
+        logger.debug(
+            "triangulate: cam=(%.0f, %.0f, %.0f) → goal=(%.0f, %.0f, %.0f) mm",
+            X, Y, Z, x_goal, y_goal, z_goal
+        )
 
         return np.array([x_goal, y_goal, z_goal], dtype=np.float64)
 

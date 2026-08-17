@@ -409,23 +409,37 @@ class TrackerWorker(QThread):
             left_det = detection.left
             right_det = detection.right
 
+            left_valid = False
+            left_x, left_y = 0.0, 0.0
             if left_det.found:
                 lx, ly = self._kalman_left.update(left_det.x, left_det.y)
                 left_det.x, left_det.y = lx, ly
-            else:
-                self._kalman_left.predict()
+                left_x, left_y = lx, ly
+                left_valid = True
+            elif self._kalman_left.is_initialized:
+                lx, ly = self._kalman_left.predict()
+                left_det.x, left_det.y = lx, ly
+                left_x, left_y = lx, ly
+                left_valid = True
 
+            right_valid = False
+            right_x, right_y = 0.0, 0.0
             if right_det.found:
                 rx, ry = self._kalman_right.update(right_det.x, right_det.y)
                 right_det.x, right_det.y = rx, ry
-            else:
-                self._kalman_right.predict()
+                right_x, right_y = rx, ry
+                right_valid = True
+            elif self._kalman_right.is_initialized:
+                rx, ry = self._kalman_right.predict()
+                right_det.x, right_det.y = rx, ry
+                right_x, right_y = rx, ry
+                right_valid = True
 
             pos_3d = None
-            if detection.both_found:
+            if left_valid and right_valid:
                 pos_3d = self._triangulator.triangulate(
-                    left_point=(left_det.x, left_det.y),
-                    right_point=(right_det.x, right_det.y),
+                    left_point=(left_x, left_y),
+                    right_point=(right_x, right_y),
                 )
 
             impact: Optional[ImpactPrediction] = None
@@ -437,10 +451,12 @@ class TrackerWorker(QThread):
                 )
                 impact = self._predictor.get_impact_prediction()
             else:
-                if not detection.left.found and not detection.right.found:
+                # Predikátor reset CSAK ha mindkét 2D Kalman tracker teljesen leállt (elvesztette a labdát)
+                if not self._kalman_left.is_initialized and not self._kalman_right.is_initialized:
                     self._predictor.reset()
-                    self._kalman_left.reset()
-                    self._kalman_right.reset()
+                else:
+                    impact = self._predictor.get_impact_prediction()
+
 
             if self._detector:
                 self._detector.draw_roi(frame_left, is_left=True)

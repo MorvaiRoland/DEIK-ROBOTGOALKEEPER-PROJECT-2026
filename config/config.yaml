@@ -115,21 +115,23 @@ geometry:
   principal_point_x: 968.0    # = 1936 / 2
   principal_point_y: 608.0    # = 1216 / 2
 
-  # ----- Sztereó elrendezés -----
-  # Kamerák X pozíciója a kapu közepétől:
-  left_camera_x_mm: -1100.0   # Bal kamera: 1100 mm-re a kapu közepétől (negatív X)
-  right_camera_x_mm: 1100.0   # Jobb kamera: 1100 mm-re a kapu közepétől (pozitív X)
+  # ----- Szte'reó elrendezés (fizikailag mért értékek) -----
+  # Bal kamera: bal kapufától 930mm jobbra (kapu közepétől: -2000+930 = -1070mm)
+  left_camera_x_mm: -1070.0
+  # Jobb kamera: jobb kapufától 930mm balra (kapu közepétől: +2000-930 = +1070mm)
+  right_camera_x_mm: 1070.0
 
   # Baseline = a két kamera közötti vízszintes távolság
-  # baseline = 2 × 1100 = 2200 mm
-  baseline_mm: 2200.0
+  # baseline = 1070 + 1070 = 2140 mm (mérve: ~2238mm, valószínű pontossági eltérés)
+  baseline_mm: 2140.0
 
-  # Kamerák magassága a talajtól
+  # Kamerák magassága a talajthatól
   camera_height_mm: 2900.0
 
   # Kamerák Z pozíciója (kapu síkjától mért távolság)
-  # 0 = pontosan a kapuvonalon vannak
-  camera_z_offset_mm: 0.0
+  # Negatív: gólvonal mögött (azaz a kapu belsejében), +Z a pálya felé mutat
+  # A kamerák 900mm-rel vannak a gólvonal mögött
+  camera_z_offset_mm: -900.0
 
   # ----- Kapu mérete -----
   goal_width_mm: 4000.0       # 4 méter széles
@@ -170,7 +172,7 @@ detection:
   # ----- YOLO modell -----
   # Javasolt: yolov10n.pt (COCO pre-trained, sports ball osztály: 32)
   # Custom tanítás után: models/custom_soccer_ball.pt (osztály: 0)
-  model_path: "models/yolov10n.pt"
+  model_path: "models/yolov10n.engine"
 
   # Az "sports ball" osztály indexe a COCO adatbázisban: 32
   # Custom modellnél (1 osztáflyos): 0
@@ -178,13 +180,13 @@ detection:
 
   # Detektálási megbízhatósági küszöb (0.0 – 1.0)
   # Alacsonyabb → több hamis pozitív; Magasabb → kihagyott detektálások
-  confidence_threshold: 0.4
+  confidence_threshold: 0.25
 
   # IoU küszöb NMS-hez (Non-Maximum Suppression) – YOLOv10 ezt belülről kezeli
   iou_threshold: 0.45
 
   # Inferencia bemeneti méret (kisebb → gyorsabb, de kisebb tárgyak elveszhetnek)
-  # Ajánlott: 1280 (jó sebesség-pontosság arány RTX 3050-en)
+  # 640: RTX 3050-en batch-ben >100 FPS (két kép), a foci 19-24 cm-es → kiválóan látható
   input_size: 1280
 
   # Inferencia eszköz: "cuda:0" = GPU (RTX 3050), "cpu" = processzor
@@ -212,12 +214,12 @@ detection:
   # Csak a kapu irányában lévő kép-tartomány feldolgozása
   # Ez csökkenti az inferencia területet → gyorsabb futás
   roi:
-    enabled: false   # Kalibrálás után érdemes engedélyezni
+    enabled: true    # Bekapcsolva az FPS növelése érdekében
     # ROI koordináták (relatív, 0.0 – 1.0)
     x_min_rel: 0.0
     x_max_rel: 1.0
-    y_min_rel: 0.1   # A kép tetejét (ég) kizárjuk
-    y_max_rel: 0.9   # A kép aljának kis részét kizárjuk
+    y_min_rel: 0.2   # A kép tetejét (ég/plafon) kizárjuk (20%)
+    y_max_rel: 0.8   # A kép aljának kis részét kizárjuk (20%)
 
 
 # =============================================================================
@@ -242,11 +244,11 @@ prediction:
   trajectory_history_size: 30
 
   # Predikciós megbízhatóság küszöb (ez alá nem mutatjuk a predikciót)
-  min_confidence_threshold: 0.4
+  min_confidence_threshold: 0.25
 
   # 3D Kalman szűrő trajektória simításhoz
   kalman_3d:
-    process_noise: 0.1
+    process_noise: 1.0
     measurement_noise: 5.0   # mm-es mérési bizonytalanság
 
 

@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Deque, List, Optional, Tuple
 
 import numpy as np
+# pyrefly: ignore [missing-import]
 from scipy.integrate import solve_ivp
 
 logger = logging.getLogger(__name__)
@@ -465,7 +466,7 @@ class TrajectoryPredictor:
 
         # 1. Pontszám: elegendő mérési pont?
         n_pts = len(self._history)
-        points_score = min(n_pts / 10.0, 1.0)  # Teljes pontszám 10 pontnál
+        points_score = min(n_pts / 5.0, 1.0)  # Teljes pontszám 5 pontnál
 
         # 2. Pontszám: nem túl messze van még?
         if pred.time_to_impact_s <= 0:
