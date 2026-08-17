@@ -174,24 +174,9 @@ class CameraManager:
                 success=False
             )
 
-        # Párhuzamos frame-olvasás (minimális időeltérés)
-        frames = [None, None]
-
-        def _read_left():
-            frames[0] = self._cam_left.read()
-
-        def _read_right():
-            frames[1] = self._cam_right.read()
-
-        t_left = threading.Thread(target=_read_left, daemon=True)
-        t_right = threading.Thread(target=_read_right, daemon=True)
-        t_left.start()
-        t_right.start()
-        t_left.join()
-        t_right.join()
-
-        frame_left: CameraFrame = frames[0]
-        frame_right: CameraFrame = frames[1]
+        # Direct non-blocking frame retrieval from background acquisition buffers
+        frame_left: CameraFrame = self._cam_left.read()
+        frame_right: CameraFrame = self._cam_right.read()
 
         # FPS mérés
         now = time.perf_counter()
@@ -259,11 +244,15 @@ class CameraManager:
             else:
                 source = mock_cfg.get("right_source", 1)
 
+            cam_specific = self._cam_config.get("left", {}) if is_left else self._cam_config.get("right", {})
+            merged_config = self._cam_config.copy()
+            merged_config.update(cam_specific)
+
             logger.info("Mock kamera létrehozása (%s, forrás='%s')", side, source)
             return MockCamera(
                 source=source,
                 is_left=is_left,
-                config=self._cam_config,
+                config=merged_config,
             )
 
         else:
@@ -272,10 +261,14 @@ class CameraManager:
                 "Ismeretlen kamera típus: '%s'. Mock módra váltok.", cam_type
             )
             source = 0 if is_left else 1
+            cam_specific = self._cam_config.get("left", {}) if is_left else self._cam_config.get("right", {})
+            merged_config = self._cam_config.copy()
+            merged_config.update(cam_specific)
+
             return MockCamera(
                 source=source,
                 is_left=is_left,
-                config=self._cam_config,
+                config=merged_config,
             )
 
     # ------------------------------------------------------------------
@@ -318,6 +311,11 @@ class CameraManager:
     # Kamera valós idejű vezérlése
     # ------------------------------------------------------------------
 
+    def set_camera_offset(self, is_left: bool, offset_x: int, offset_y: int) -> None:
+        cam = self._cam_left if is_left else self._cam_right
+        if cam and hasattr(cam, "set_offset"):
+            cam.set_offset(offset_x, offset_y)
+
     def set_camera_exposure(self, is_left: bool, exposure_us: int) -> None:
         cam = self._cam_left if is_left else self._cam_right
         if cam and hasattr(cam, "set_exposure"):
@@ -337,6 +335,15 @@ class CameraManager:
         cam = self._cam_left if is_left else self._cam_right
         if cam and hasattr(cam, "set_wb"):
             cam.set_wb(kr, kg, kb)
+
+    def set_camera_transform(self, is_left: bool, flip_h: bool, flip_v: bool, rotation: int) -> None:
+        cam = self._cam_left if is_left else self._cam_right
+        if cam:
+            if hasattr(cam, "set_flip"):
+                cam.set_flip(flip_h, flip_v)
+            if hasattr(cam, "set_rotation"):
+                cam.set_rotation(rotation)
+
 
     # ------------------------------------------------------------------
     # Context manager támogatás

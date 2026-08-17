@@ -28,6 +28,7 @@ import time
 from collections import deque
 from typing import Optional
 
+# pyrefly: ignore [missing-import]
 import cv2
 import numpy as np
 
@@ -128,6 +129,12 @@ class XimeaCamera(BaseCamera):
         self._exposure_us = int(config.get("exposure_time_us", 3000))
         self._gain_db = float(config.get("gain_db", 0.0))
         self._bandwidth_mbs = int(config.get("bandwidth_limit_mbs", 160))
+        self._offset_x = int(config.get("offset_x", 0))
+        self._offset_y = int(config.get("offset_y", 0))
+        self._flip_h = bool(config.get("flip_h", False))
+        self._flip_v = bool(config.get("flip_v", False))
+        self._rotation = int(config.get("rotation", 0))
+
 
         # Ximea SDK objektumok
         self._cam: Optional[xiapi.Camera] = None
@@ -449,6 +456,10 @@ class XimeaCamera(BaseCamera):
                 # NumPy tömbbé alakítás és RGB->BGR konverzió OpenCV-hez
                 raw = self._xi_image.get_image_data_numpy()
                 bgr_image = cv2.cvtColor(raw, cv2.COLOR_RGB2BGR)
+
+                # Alkalmazzuk az X/Y elmozdulást, tükrözést és elforgatást
+                bgr_image = self.apply_image_transformations(bgr_image)
+
 
                 # Frame metaadatok
                 timestamp = time.perf_counter()

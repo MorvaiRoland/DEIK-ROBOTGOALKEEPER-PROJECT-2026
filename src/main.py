@@ -167,8 +167,11 @@ def start_gui(config: dict) -> None:
         config: A konfiguráció dict
     """
     try:
+        # pyrefly: ignore [missing-import]
         from PyQt6.QtWidgets import QApplication
         from gui.main_window import MainWindow
+        from gui.splash_screen import SplashScreen
+        from gui.theme import get_app_icon
     except ImportError as exc:
         logging.error("PyQt6 importálási hiba: %s", exc)
         logging.error("Telepítés: pip install PyQt6")
@@ -178,10 +181,21 @@ def start_gui(config: dict) -> None:
     app.setApplicationName("DEIK Robot Foci Kapus")
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("DEIK")
+    app.setDesktopFileName("deik-robotgoalkeeper")
 
-    # Főablak megnyitása
+    app_icon = get_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
+
+    # Betöltő ablak (SplashScreen) indítása a két logóval
+    splash = SplashScreen()
+    splash.show()
+    splash.run_loading_sequence()
+
+    # Főablak megnyitása teljes képernyős módban (cím- és tálcasor nélkül)
     window = MainWindow(config)
-    window.show()
+    window.showFullScreen()
+    splash.close()
 
     logging.info("GUI elindult – kattints a INDÍTÁS gombra a kamerák aktiválásához")
 
@@ -283,6 +297,7 @@ def main() -> None:
 
     # Ellenőrzés: CUDA elérhető-e?
     try:
+        # pyrefly: ignore [missing-import]
         import torch
         if torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)

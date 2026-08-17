@@ -31,13 +31,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+# pyrefly: ignore [missing-import]
 import cv2
+# pyrefly: ignore [missing-import]
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 # Ultralytics importálása (YOLO modell kezelő)
 try:
+    # pyrefly: ignore [missing-import]
     from ultralytics import YOLO
     ULTRALYTICS_AVAILABLE = True
 except ImportError:
@@ -134,13 +137,17 @@ class BallDetector:
         self._tracking_enabled = bool(tracking_cfg.get("enabled", True))
         self._tracker_config = str(tracking_cfg.get("tracker_config", "bytetrack.yaml"))
 
-        # ROI konfig
+        # ROI konfig (külön bal és jobb kamerára)
         roi_cfg = config.get("roi", {})
-        self._roi_enabled = bool(roi_cfg.get("enabled", False))
-        self._roi_x_min = float(roi_cfg.get("x_min_rel", 0.0))
-        self._roi_x_max = float(roi_cfg.get("x_max_rel", 1.0))
-        self._roi_y_min = float(roi_cfg.get("y_min_rel", 0.0))
-        self._roi_y_max = float(roi_cfg.get("y_max_rel", 1.0))
+        default_roi = {
+            "enabled": bool(roi_cfg.get("enabled", False)),
+            "x_min_rel": float(roi_cfg.get("x_min_rel", 0.0)),
+            "x_max_rel": float(roi_cfg.get("x_max_rel", 1.0)),
+            "y_min_rel": float(roi_cfg.get("y_min_rel", 0.1)),
+            "y_max_rel": float(roi_cfg.get("y_max_rel", 0.9)),
+        }
+        self._left_roi = default_roi.copy()
+        self._right_roi = default_roi.copy()
 
         # YOLO modell betöltése
         self._model: Optional[YOLO] = None
@@ -152,6 +159,49 @@ class BallDetector:
 
         logger.info("BallDetector kész: modell='%s', eszköz='%s'",
                     self._model_path, self._device)
+
+    def set_roi(
+        self,
+        is_left: bool,
+        enabled: bool,
+        x_min_rel: float,
+        x_max_rel: float,
+        y_min_rel: float,
+        y_max_rel: float
+    ) -> None:
+        """Beállítja egy kamera ROI paramétereit dinamikusan."""
+        roi_dict = {
+            "enabled": bool(enabled),
+            "x_min_rel": max(0.0, min(1.0, float(x_min_rel))),
+            "x_max_rel": max(0.0, min(1.0, float(x_max_rel))),
+            "y_min_rel": max(0.0, min(1.0, float(y_min_rel))),
+            "y_max_rel": max(0.0, min(1.0, float(y_max_rel))),
+        }
+        if is_left:
+            self._left_roi = roi_dict
+        else:
+            self._right_roi = roi_dict
+        logger.debug("ROI frissítve (%s): %s", "bal" if is_left else "jobb", roi_dict)
+
+    def draw_roi(self, frame: np.ndarray, is_left: bool) -> np.ndarray:
+        """Kirajzolja az aktív ROI keretet a kameraképre."""
+        roi = self._left_roi if is_left else self._right_roi
+        if not roi.get("enabled", False):
+            return frame
+
+        h, w = frame.shape[:2]
+        x1 = int(w * roi["x_min_rel"])
+        x2 = int(w * roi["x_max_rel"])
+        y1 = int(h * roi["y_min_rel"])
+        y2 = int(h * roi["y_max_rel"])
+
+        # Sárgás-cián téglalap és felirat a ROI kijelzéséhez
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+        cv2.putText(
+            frame, "ROI ACTIVE", (x1 + 6, max(y1 + 20, 22)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1
+        )
+        return frame
 
     def _load_model(self) -> None:
         """
@@ -218,8 +268,8 @@ class BallDetector:
         t_start = time.perf_counter()
 
         # --- ROI alkalmazása (opcionális) ---
-        left_proc, left_roi_offset = self._apply_roi(frame_left)
-        right_proc, right_roi_offset = self._apply_roi(frame_right)
+        left_proc, left_roi_offset = self._apply_roi(frame_left, is_left=True)
+        right_proc, right_roi_offset = self._apply_roi(frame_right, is_left=False)
 
         # --- YOLO inferencia ---
         # Ha tracking engedélyezett: model.track() → ByteTrack ID-k
@@ -275,28 +325,36 @@ class BallDetector:
     # ------------------------------------------------------------------
 
     def _apply_roi(
-        self, frame: np.ndarray
+        self, frame: np.ndarray, is_left: bool
     ) -> Tuple[np.ndarray, Tuple[int, int]]:
         """
-        Kivágja a ROI területet a képből (ha ROI engedélyezett).
+        Kivágja a ROI területet a képből (ha ROI engedélyezett az adott kamerán).
 
         Args:
-            frame: Teljes kép
+            frame:   Teljes kép
+            is_left: True = bal kamera, False = jobb kamera
 
         Returns:
             Tuple: (ROI kép, (x_offset, y_offset) a teljes képhez képest)
         """
-        if not self._roi_enabled:
+        roi = self._left_roi if is_left else self._right_roi
+        if not roi.get("enabled", False):
             return frame, (0, 0)
 
         h, w = frame.shape[:2]
-        x1 = int(w * self._roi_x_min)
-        x2 = int(w * self._roi_x_max)
-        y1 = int(h * self._roi_y_min)
-        y2 = int(h * self._roi_y_max)
+        x1 = int(w * roi["x_min_rel"])
+        x2 = int(w * roi["x_max_rel"])
+        y1 = int(h * roi["y_min_rel"])
+        y2 = int(h * roi["y_max_rel"])
+
+        x1 = max(0, min(w - 1, x1))
+        x2 = max(x1 + 1, min(w, x2))
+        y1 = max(0, min(h - 1, y1))
+        y2 = max(y1 + 1, min(h, y2))
 
         roi_crop = frame[y1:y2, x1:x2]
         return roi_crop, (x1, y1)
+
 
     def _extract_best_ball(
         self,
