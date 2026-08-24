@@ -224,7 +224,7 @@ def start_headless(config: dict) -> None:
 
     # Komponensek
     cam_manager = CameraManager(config)
-    detector = BallDetector(config["detection"])
+    detector = BallDetector(config["detection"], full_config=config)
     triangulator = StereoTriangulator(config)
     predictor = TrajectoryPredictor(config)
 

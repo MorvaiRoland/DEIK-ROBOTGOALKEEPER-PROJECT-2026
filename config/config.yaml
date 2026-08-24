@@ -166,28 +166,55 @@ stereo:
 
 
 # =============================================================================
+# Labda fizikai paraméterek
+# =============================================================================
+ball:
+  # Labda típusa (referencia)
+  type: "kipsta_size4_orange"
+
+  # 4-es méretű labda: ~210mm átmérő, ~340g tömeg
+  # (5-ös méret: 220mm / 430g)
+  diameter_mm: 210
+  mass_kg: 0.340
+
+  # Gömb légellenállási koefficiense (dimenzió nélküli)
+  drag_coefficient: 0.47
+
+  # ----- HSV szín-ellenőrző (narancssárga Kipsta labda) -----
+  # Finomhangolva a fehér mintás Kipsta labdához:
+  # s_min=75 és min_orange_ratio=0.08 (8%) úgy lett beállítva, hogy a labdán lévő
+  # fehér feliratok ("KIPSTA") és grafikák se okozzanak elutasítást!
+  hsv_filter:
+    enabled: true
+    h_min: 5       # Narancssárga hue alsó határ (OpenCV: 0-180)
+    h_max: 25      # Narancssárga hue felső határ
+    s_min: 75      # Finomhangolt szaturáció (átengedi a fehér mintás labdát is)
+    s_max: 255
+    v_min: 60      # Minimum világosság
+    v_max: 255
+    min_orange_ratio: 0.08   # A labda területének legalább 8%-a narancssárga legyen
+
+
+# =============================================================================
 # Labdadetektálás
 # =============================================================================
 detection:
-  # ----- YOLO modell -----
-  # Javasolt: yolov10n.pt (COCO pre-trained, sports ball osztály: 32)
-  # Custom tanítás után: models/custom_soccer_ball.pt (osztály: 0)
-  model_path: "models/yolov10n.engine"
+  # ----- Modell Választás -----
+  # "models/yolov10n_custom_640.engine" → Labda-specifikus TensorRT modell (350 FPS, AJÁNLOTT!)
+  model_path: "models/yolov8n.engine"
 
-  # Az "sports ball" osztály indexe a COCO adatbázisban: 32
-  # Custom modellnél (1 osztáflyos): 0
+  # Custom modell osztály ID: 0 (egyetlen osztály: labda)
   ball_class_id: 32
 
   # Detektálási megbízhatósági küszöb (0.0 – 1.0)
-  # Alacsonyabb → több hamis pozitív; Magasabb → kihagyott detektálások
-  confidence_threshold: 0.25
+  # 0.15: Érzékeny beállítás, hogy a 20-50%-os konfidenciájú detektálásokat is elfogadja!
+  confidence_threshold: 0.15
 
   # IoU küszöb NMS-hez (Non-Maximum Suppression) – YOLOv10 ezt belülről kezeli
   iou_threshold: 0.45
 
-  # Inferencia bemeneti méret (kisebb → gyorsabb, de kisebb tárgyak elveszhetnek)
-  # 640: RTX 3050-en batch-ben >100 FPS (két kép), a foci 19-24 cm-es → kiválóan látható
-  input_size: 1280
+  # Inferencia bemeneti méret (kisebb → gyorsabb, RTX 3050-en batch=2-vel >100 FPS)
+  input_size: 640
 
   # Inferencia eszköz: "cuda:0" = GPU (RTX 3050), "cpu" = processzor
   device: "cuda:0"
@@ -204,22 +231,25 @@ detection:
   kalman:
     enabled: true
     # Folyamaterrör (minél nagyobb, annál érzékenyebb az új mérésekre)
-    process_noise: 0.03
+    # 0.05: gyorsabban követi a labda hirtelen irányváltozásait
+    process_noise: 0.05
     # Mérési zaj (minél nagyobb, annál inkább bíz a predikciós modellben)
-    measurement_noise: 0.1
+    # 0.05: jobban bízunk a YOLO mérésben (kevesebb simítás)
+    measurement_noise: 0.05
     # Ennyi frame nélküli detektálás után nullázzuk a szűrőt
-    max_coast_frames: 10
+    # 5: gyorsabb újradetektálás elvesztett labda esetén
+    max_coast_frames: 5
 
   # ----- Region of Interest (ROI) -----
-  # Csak a kapu irányában lévő kép-tartomány feldolgozása
-  # Ez csökkenti az inferencia területet → gyorsabb futás
+  # Opcionális kép-terület szűrés. A kapus rendszernél kikapcsolva (enabled: false),
+  # hogy a magasra lőtt/dobott (levegőben szálló) labdák is 100%-ban láthatóak legyenek.
   roi:
-    enabled: true    # Bekapcsolva az FPS növelése érdekében
+    enabled: false   # Kikapcsolva, hogy a levegőben lévő labdákat ne vágja le!
     # ROI koordináták (relatív, 0.0 – 1.0)
     x_min_rel: 0.0
     x_max_rel: 1.0
-    y_min_rel: 0.2   # A kép tetejét (ég/plafon) kizárjuk (20%)
-    y_max_rel: 0.8   # A kép aljának kis részét kizárjuk (20%)
+    y_min_rel: 0.0   # Teljes vertikális tartomány (0% = a kép legteteje)
+    y_max_rel: 1.0   # (100% = a kép legalja)
 
 
 # =============================================================================
@@ -230,8 +260,8 @@ prediction:
   gravity_mm_s2: 9810.0
 
   # Légellenállás koefficiense (dimenzió nélküli, 0 = nincs ellenállás)
-  # 5-ös focilabda: kb. 0.0003 – 0.0005
-  drag_coefficient: 0.0004
+  # 4-es Kipsta focilabda: kisebb és könnyebb, nagyobb drag/tömeg arány
+  drag_coefficient: 0.0005
 
   # A Z=0 síkban (kapuvonalon) prediktáljuk az impact-pontot
   goal_plane_z_mm: 0.0

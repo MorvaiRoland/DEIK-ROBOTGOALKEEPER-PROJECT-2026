@@ -356,7 +356,7 @@ class TrackerWorker(QThread):
 
         try:
             self._cam_manager = CameraManager(self._config)
-            self._detector = BallDetector(self._config["detection"])
+            self._detector = BallDetector(self._config["detection"], full_config=self._config)
             self._triangulator = StereoTriangulator(self._config)
             self._predictor = TrajectoryPredictor(self._config)
 
@@ -418,9 +418,14 @@ class TrackerWorker(QThread):
                 left_valid = True
             elif self._kalman_left.is_initialized:
                 lx, ly = self._kalman_left.predict()
-                left_det.x, left_det.y = lx, ly
-                left_x, left_y = lx, ly
-                left_valid = True
+                if lx > 0 and ly > 0:
+                    r = left_det.radius if left_det.radius > 0 else 25.0
+                    left_det.found = True
+                    left_det.x, left_det.y = lx, ly
+                    left_det.radius = r
+                    left_det.bbox = (lx - r, ly - r, lx + r, ly + r)
+                    left_x, left_y = lx, ly
+                    left_valid = True
 
             right_valid = False
             right_x, right_y = 0.0, 0.0
@@ -431,9 +436,14 @@ class TrackerWorker(QThread):
                 right_valid = True
             elif self._kalman_right.is_initialized:
                 rx, ry = self._kalman_right.predict()
-                right_det.x, right_det.y = rx, ry
-                right_x, right_y = rx, ry
-                right_valid = True
+                if rx > 0 and ry > 0:
+                    r = right_det.radius if right_det.radius > 0 else 25.0
+                    right_det.found = True
+                    right_det.x, right_det.y = rx, ry
+                    right_det.radius = r
+                    right_det.bbox = (rx - r, ry - r, rx + r, ry + r)
+                    right_x, right_y = rx, ry
+                    right_valid = True
 
             pos_3d = None
             if left_valid and right_valid:
@@ -985,12 +995,12 @@ class MainWindow(QMainWindow):
 
         spin_ymin = QSpinBox()
         spin_ymin.setRange(0, 99)
-        spin_ymin.setValue(int(cam_cfg.get("roi_y_min", 10)))
+        spin_ymin.setValue(int(cam_cfg.get("roi_y_min", 0)))
         spin_ymin.setSuffix(" %")
 
         spin_ymax = QSpinBox()
         spin_ymax.setRange(1, 100)
-        spin_ymax.setValue(int(cam_cfg.get("roi_y_max", 90)))
+        spin_ymax.setValue(int(cam_cfg.get("roi_y_max", 100)))
         spin_ymax.setSuffix(" %")
 
         h_roi_y = QHBoxLayout()

@@ -50,18 +50,31 @@ logger = logging.getLogger(__name__)
 # Levegő sűrűsége (kg/m³) – szobahőmérsékleten, tengerszinten
 AIR_DENSITY_KG_M3 = 1.225
 
-# 5-ös focilabda fizikai paraméterei (FIFA specifikáció)
-BALL_RADIUS_M = 0.11          # Sugár méterben (220mm átmérő)
-BALL_MASS_KG = 0.430          # Tömeg kilogrammban
-BALL_DRAG_COEFF = 0.47        # Gömb légellenállási koefficiense
+# 4-es Kipsta focilabda fizikai paraméterei (alapértelmezett)
+# Ezeket a config.yaml "ball" szekciója felülírhatja!
+DEFAULT_BALL_DIAMETER_MM = 210    # 4-es méret: ~210mm átmérő
+DEFAULT_BALL_MASS_KG = 0.340     # 4-es méret: ~340g tömeg
+DEFAULT_BALL_DRAG_COEFF = 0.47   # Gömb légellenállási koefficiense
 
-# Labda keresztmetszetű területe (m²)
-BALL_CROSS_AREA_M2 = np.pi * BALL_RADIUS_M ** 2
 
-# Légellenállás erő/sebesség² előszorzó:
-#   F_d = k_d × |v|² × v_egység
-#   k_d = 0.5 × ρ × C_d × A / m
-DRAG_FACTOR = 0.5 * AIR_DENSITY_KG_M3 * BALL_DRAG_COEFF * BALL_CROSS_AREA_M2 / BALL_MASS_KG
+def compute_drag_factor(diameter_mm: float, mass_kg: float, drag_coeff: float) -> float:
+    """
+    Kiszámítja a légellenállási faktor értékét a labda paraméterei alapján.
+
+    F_d = k_d × |v|² × v_egység
+    k_d = 0.5 × ρ × C_d × A / m
+
+    Args:
+        diameter_mm: Labda átmérő mm-ben
+        mass_kg:     Labda tömeg kg-ban
+        drag_coeff:  Légellenállási koefficiens (dimenzió nélküli)
+
+    Returns:
+        Drag factor (m^-1 egységben)
+    """
+    radius_m = (diameter_mm / 1000.0) / 2.0
+    cross_area_m2 = np.pi * radius_m ** 2
+    return 0.5 * AIR_DENSITY_KG_M3 * drag_coeff * cross_area_m2 / mass_kg
 
 
 # --------------------------------------------------------------------------- #
@@ -133,13 +146,26 @@ class TrajectoryPredictor:
     def __init__(self, config: dict):
         """
         Args:
-            config: A system_config.yaml "prediction" szekciója
+            config: A system_config.yaml teljes tartalma
         """
         self._pred_cfg = config.get("prediction", {})
 
         # Fizikai konstansok
         self._gravity_mm_s2 = float(self._pred_cfg.get("gravity_mm_s2", 9810.0))
-        self._drag_coeff_cfg = float(self._pred_cfg.get("drag_coefficient", 0.0004))
+        self._drag_coeff_cfg = float(self._pred_cfg.get("drag_coefficient", 0.0005))
+
+        # ----- Labda fizikai paraméterei (config "ball" szekciójából) -----
+        ball_cfg = config.get("ball", {})
+        self._ball_diameter_mm = float(ball_cfg.get("diameter_mm", DEFAULT_BALL_DIAMETER_MM))
+        self._ball_mass_kg = float(ball_cfg.get("mass_kg", DEFAULT_BALL_MASS_KG))
+        self._ball_drag_coeff = float(ball_cfg.get("drag_coefficient", DEFAULT_BALL_DRAG_COEFF))
+
+        # Légellenállási faktor kiszámítása a labda paramétereiből
+        self._drag_factor = compute_drag_factor(
+            self._ball_diameter_mm,
+            self._ball_mass_kg,
+            self._ball_drag_coeff,
+        )
 
         # Kapu paraméterei
         geo_cfg = config.get("geometry", {})
@@ -168,10 +194,14 @@ class TrajectoryPredictor:
         self._last_prediction: Optional[ImpactPrediction] = None
 
         logger.info(
-            "TrajectoryPredictor kész: g=%.0f mm/s², kapu=%dx%d mm",
+            "TrajectoryPredictor kész: g=%.0f mm/s², kapu=%dx%d mm, "
+            "labda=%.0fmm/%.0fg, drag_factor=%.5f",
             self._gravity_mm_s2,
             self._goal_width_mm,
-            self._goal_height_mm
+            self._goal_height_mm,
+            self._ball_diameter_mm,
+            self._ball_mass_kg * 1000,
+            self._drag_factor,
         )
 
     # ------------------------------------------------------------------
@@ -295,6 +325,7 @@ class TrajectoryPredictor:
         vel0_ms = np.array([vx0, vy0, vz0]) * MM_TO_M  # mm/s → m/s
 
         g_ms2 = self._gravity_mm_s2 * MM_TO_M  # mm/s² → m/s²
+        drag_factor = self._drag_factor  # Instance-szintű drag faktor (labda paraméterekből)
 
         def equations_of_motion(t, state):
             """
@@ -311,7 +342,7 @@ class TrajectoryPredictor:
             v_norm = np.linalg.norm(v)
 
             # Légellenállás gyorsulás (m/s²)
-            drag_accel = -DRAG_FACTOR * v_norm * v if v_norm > 1e-10 else np.zeros(3)
+            drag_accel = -drag_factor * v_norm * v if v_norm > 1e-10 else np.zeros(3)
 
             # Összesített gyorsulás
             ax = drag_accel[0]

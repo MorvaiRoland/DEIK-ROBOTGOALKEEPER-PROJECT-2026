@@ -453,9 +453,12 @@ class XimeaCamera(BaseCamera):
                 # Timeout: 1000 ms (ha ennyi idő alatt nincs frame, exception)
                 self._cam.get_image(self._xi_image, timeout=1000)
 
-                # NumPy tömbbé alakítás és RGB->BGR konverzió OpenCV-hez
-                raw = self._xi_image.get_image_data_numpy()
-                bgr_image = cv2.cvtColor(raw, cv2.COLOR_RGB2BGR)
+                # NumPy tömbbé alakítás
+                # MEGJEGYZÉS: A Ximea XI_RGB24 formátum BGR byte-sorrendben adja a pixeleket,
+                # ami az OpenCV natív formátuma. NEM kell COLOR_RGB2BGR konverzió!
+                # (Korábbi COLOR_RGB2BGR hívás HIBÁSAN megcserélte a piros és kék csatornákat,
+                #  ezért jelent meg a narancssárga labda kékként.)
+                bgr_image = self._xi_image.get_image_data_numpy()
 
                 # Alkalmazzuk az X/Y elmozdulást, tükrözést és elforgatást
                 bgr_image = self.apply_image_transformations(bgr_image)
