@@ -46,10 +46,13 @@ camera:
   # Csak gyenge fényviszonyoknál növeld!
   gain_db: 0.0
 
-  # USB3 sávszélesség korlát (MB/s kameránként)
-  # Két kamera esetén a teljes sávszélesség 2 × korlát
-  # USB 3.0: ~400 MB/s max → kameránként 160-180 MB/s biztonságos
-  bandwidth_limit_mbs: 160
+  # Ximea USB3 sávszélesség-kezelés.
+  # FONTOS: a xiAPI Mbit/s-ban (nem MB/s-ban) értelmezi a limitet.
+  # "unlimited": kikapcsolja a mesterséges limitet. Ezt CSAK akkor használd,
+  # ha a két kamera külön "5000M" USB root hub / vezérlő alatt van.
+  # "limited": közös USB vezérlőn a limit_mbps értékkel szabályoz.
+  bandwidth_mode: "unlimited"
+  bandwidth_limit_mbps: null
 
   # Ximea gyári sorozatszámok (visszafelé kompatibilitás)
   serial_number_left: "CACAU2546000"

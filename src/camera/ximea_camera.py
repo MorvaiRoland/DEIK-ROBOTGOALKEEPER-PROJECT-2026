@@ -79,7 +79,8 @@ class XimeaCamera(BaseCamera):
 
     Example:
         cfg = {"fps": 100, "exposure_time_us": 3000, "gain_db": 0.0,
-               "bandwidth_limit_mbs": 160, "resolution": {"width": 1936, "height": 1216}}
+               "bandwidth_mode": "unlimited",
+               "resolution": {"width": 1936, "height": 1216}}
 
         cam = XimeaCamera(camera_index=0, is_left=True, config=cfg)
         if cam.open():
@@ -128,7 +129,21 @@ class XimeaCamera(BaseCamera):
         self._target_fps = float(config.get("fps", 100))
         self._exposure_us = int(config.get("exposure_time_us", 3000))
         self._gain_db = float(config.get("gain_db", 0.0))
-        self._bandwidth_mbs = int(config.get("bandwidth_limit_mbs", 160))
+        self._bandwidth_mode = str(config.get("bandwidth_mode", "unlimited")).lower()
+        raw_bandwidth_limit = config.get("bandwidth_limit_mbps")
+        self._bandwidth_limit_mbps: Optional[int] = (
+            int(raw_bandwidth_limit) if raw_bandwidth_limit is not None else None
+        )
+        if self._bandwidth_mode not in {"unlimited", "limited"}:
+            raise ValueError(
+                "Ismeretlen bandwidth_mode: "
+                f"{self._bandwidth_mode!r}; 'unlimited' vagy 'limited' lehet."
+            )
+        if self._bandwidth_mode == "limited" and self._bandwidth_limit_mbps is None:
+            raise ValueError(
+                "bandwidth_mode='limited' esetén a bandwidth_limit_mbps kötelező "
+                "(xiAPI egység: Mbit/s)."
+            )
         self._offset_x = int(config.get("offset_x", 0))
         self._offset_y = int(config.get("offset_y", 0))
         self._flip_h = bool(config.get("flip_h", False))
@@ -275,25 +290,52 @@ class XimeaCamera(BaseCamera):
         self._cam.set_gain(self._gain_db)
         logger.debug("  Erősítés: %.1f dB", self._gain_db)
 
-        # --- USB3 sávszélesség korlátozás ---
+        # --- Képformátum ---
+        # A formatum megváltoztathatja a lehetséges frame rate-et, ezért ezt
+        # a sávszélesség- és FPS-paraméterek ELŐTT kell beállítani.
+        # XI_RGB24 = Ximea 24-bites színes formátum (OpenCV-hez BGR sorrendben)
+        self._cam.set_imgdataformat("XI_RGB24")
+
+        # --- USB3 sávszélesség ---
+        # XI_PRM_LIMIT_BANDWIDTH egysége Mbit/s, nem MB/s. Külön 5 Gbit/s
+        # USB root hubon a XI_OFF engedi a kamera által elérhető maximumot.
         try:
-            self._cam.set_limit_bandwidth_mode("XI_ON")
-            self._cam.set_limit_bandwidth(self._bandwidth_mbs)
-            logger.debug("  USB sávszélesség korlát: %d MB/s", self._bandwidth_mbs)
+            if self._bandwidth_mode == "unlimited":
+                self._cam.set_limit_bandwidth_mode("XI_OFF")
+                logger.info("  USB sávszélesség: korlátlan (XI_OFF)")
+            else:
+                self._cam.set_limit_bandwidth(self._bandwidth_limit_mbps)
+                self._cam.set_limit_bandwidth_mode("XI_ON")
+                logger.info(
+                    "  USB sávszélesség limit: %d Mbit/s",
+                    self._bandwidth_limit_mbps,
+                )
         except Exception as exc:
-            logger.debug("  Sávszélesség korlát beállítása szkippelve: %s", exc)
+            logger.warning("  USB sávszélesség beállítási hiba: %s", exc)
 
         # --- Frame rate ---
         try:
-            self._cam.set_acq_timing_mode("XI_ACQ_TIMING_MODE_FRAME_RATE")
+            # MC kameracsaládhoz a xiAPI FRAME_RATE_LIMIT módot ajánl.
+            self._cam.set_acq_timing_mode("XI_ACQ_TIMING_MODE_FRAME_RATE_LIMIT")
             self._cam.set_framerate(self._target_fps)
-            logger.debug("  Frame rate: %.1f FPS", self._target_fps)
+            logger.info("  Cél frame rate: %.1f FPS", self._target_fps)
         except Exception as exc:
-            logger.debug("  Frame rate beállítása szkippelve: %s", exc)
+            logger.warning("  Frame rate beállítási hiba: %s", exc)
 
-        # --- Képformátum ---
-        # XI_RGB24 = Ximea 24-bites színes formátum (OpenCV-hez BGR-ré konvertáljuk)
-        self._cam.set_imgdataformat("XI_RGB24")
+        # A tényleges SDK-értékek naplózása teszteléshez. Ezek mutatják meg,
+        # hogy a kábel/port valóban SuperSpeed-en és elegendő sávszélességgel fut-e.
+        try:
+            logger.info(
+                "  XiAPI kapcsolat: elérhető=%d Mbit/s, limit=%d Mbit/s, "
+                "beállított=%.1f FPS, max=%.1f FPS, payload=%d byte",
+                self._cam.get_available_bandwidth(),
+                self._cam.get_limit_bandwidth(),
+                self._cam.get_framerate(),
+                self._cam.get_framerate_maximum(),
+                self._cam.get_image_payload_size(),
+            )
+        except Exception as exc:
+            logger.warning("  XiAPI diagnosztikai értékek nem olvashatók: %s", exc)
 
         # --- Fehéregyensúly (White Balance) ---
         # Színes CMOS szenzoroknál (Sony IMX174) AWB nélkül a kép zöldes árnyalatú,

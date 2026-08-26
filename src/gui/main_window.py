@@ -18,8 +18,10 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
 
 # pyrefly: ignore [missing-import]
 # type: ignore
@@ -47,7 +49,7 @@ from PyQt6.QtWidgets import (
 )
 
 from camera.camera_manager import CameraManager, StereoPair
-from detection.ball_detector import BallDetector, StereoBallDetection
+from detection.ball_detector import BallDetection, BallDetector, StereoBallDetection
 from detection.kalman_tracker import KalmanTracker2D
 from stereo.triangulator import StereoTriangulator
 from prediction.trajectory_predictor import TrajectoryPredictor, ImpactPrediction
@@ -275,23 +277,108 @@ class ZoomableLabel(QLabel):
 
 
 # --------------------------------------------------------------------------- #
-# Háttérszál (TrackerWorker)
+# Kis késleltetésű kamera → inferencia → GUI pipeline
 # --------------------------------------------------------------------------- #
 
-class TrackerWorker(QThread):
-    frames_ready = pyqtSignal(np.ndarray, np.ndarray, dict)
-    error_occurred = pyqtSignal(str)
-    tracker_stopped = pyqtSignal()
 
-    def __init__(self, config: dict, parent: Optional[QObject] = None):
-        super().__init__(parent)
+@dataclass(frozen=True)
+class StereoFrameSnapshot:
+    """Immutable ownership snapshot shared by the preview and inference stages."""
+
+    sequence: int
+    left_image: np.ndarray
+    right_image: np.ndarray
+    left_frame_id: int
+    right_frame_id: int
+    timestamp: float
+
+
+@dataclass
+class TrackingState:
+    """The newest completed inference result, independent from preview cadence."""
+
+    source_sequence: int
+    detection: StereoBallDetection
+    pos_3d: Optional[np.ndarray]
+    impact: Optional[ImpactPrediction]
+    velocity_mm_s: Tuple[float, float, float]
+    calibrated: bool
+    completed_at: float
+
+
+class LatestStereoFrame:
+    """One-slot exchange: consumers always receive the newest available pair."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._latest: Optional[StereoFrameSnapshot] = None
+        self._stopped = False
+
+    def publish(self, snapshot: StereoFrameSnapshot) -> None:
+        with self._condition:
+            self._latest = snapshot
+            self._condition.notify_all()
+
+    def wait_for_newer(
+        self, last_sequence: int, timeout: float = 0.1
+    ) -> Optional[StereoFrameSnapshot]:
+        with self._condition:
+            newer_frame_available = self._condition.wait_for(
+                lambda: self._stopped or (
+                    self._latest is not None and self._latest.sequence > last_sequence
+                ),
+                timeout=timeout,
+            )
+            if self._stopped or not newer_frame_available:
+                return None
+            return self._latest
+
+    def stop(self) -> None:
+        with self._condition:
+            self._stopped = True
+            self._condition.notify_all()
+
+
+class LatestTrackingState:
+    """Thread-safe holder for the last completed YOLO/Kalman result."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state: Optional[TrackingState] = None
+
+    def publish(self, state: TrackingState) -> None:
+        with self._lock:
+            self._state = state
+
+    def get(self) -> Optional[TrackingState]:
+        with self._lock:
+            return self._state
+
+
+class DetectionWorker(threading.Thread):
+    """Runs GPU inference independently and deliberately drops stale camera pairs."""
+
+    def __init__(
+        self,
+        config: dict,
+        frame_exchange: LatestStereoFrame,
+        result_exchange: LatestTrackingState,
+    ) -> None:
+        super().__init__(name="BallDetection", daemon=True)
         self._config = config
-        self._running = False
-
-        self._cam_manager: Optional[CameraManager] = None
+        self._frame_exchange = frame_exchange
+        self._result_exchange = result_exchange
+        self._running = threading.Event()
+        self._running.set()
+        self._detector_lock = threading.Lock()
         self._detector: Optional[BallDetector] = None
-        self._triangulator: Optional[StereoTriangulator] = None
-        self._predictor: Optional[TrajectoryPredictor] = None
+        roi_cfg = config.get("detection", {}).get("roi", {})
+        self._roi_settings = {
+            True: self._make_roi(roi_cfg),
+            False: self._make_roi(roi_cfg),
+        }
+        self._error_lock = threading.Lock()
+        self._error: Optional[str] = None
 
         det_cfg = config.get("detection", {})
         kalman_cfg = det_cfg.get("kalman", {})
@@ -306,12 +393,175 @@ class TrackerWorker(QThread):
             max_coast_frames=kalman_cfg.get("max_coast_frames", 10),
         )
 
+    @property
+    def error(self) -> Optional[str]:
+        with self._error_lock:
+            return self._error
+
+    def stop(self) -> None:
+        self._running.clear()
+        self._frame_exchange.stop()
+
+    def set_roi(
+        self,
+        is_left: bool,
+        enabled: bool,
+        x_min_rel: float,
+        x_max_rel: float,
+        y_min_rel: float,
+        y_max_rel: float,
+    ) -> None:
+        with self._detector_lock:
+            self._roi_settings[is_left] = {
+                "enabled": bool(enabled),
+                "x_min_rel": float(x_min_rel),
+                "x_max_rel": float(x_max_rel),
+                "y_min_rel": float(y_min_rel),
+                "y_max_rel": float(y_max_rel),
+            }
+            if self._detector:
+                self._detector.set_roi(
+                    is_left, enabled, x_min_rel, x_max_rel, y_min_rel, y_max_rel
+                )
+
+    def run(self) -> None:
+        last_sequence = 0
+        try:
+            detector = BallDetector(self._config["detection"], full_config=self._config)
+            triangulator = StereoTriangulator(self._config)
+            predictor = TrajectoryPredictor(self._config)
+            cal_file = self._config.get("stereo", {}).get(
+                "calibration_file", "data/calibration/stereo_calibration.npz"
+            )
+            triangulator.load_calibration(cal_file)
+
+            with self._detector_lock:
+                self._detector = detector
+                for is_left, roi in self._roi_settings.items():
+                    detector.set_roi(is_left, **roi)
+
+            logger.info("Detektáló szál elindult (latest-frame üzemmód)")
+            while self._running.is_set():
+                snapshot = self._frame_exchange.wait_for_newer(last_sequence)
+                if snapshot is None:
+                    break
+                last_sequence = snapshot.sequence
+
+                # The lock also makes live ROI updates safe while Ultralytics is running.
+                with self._detector_lock:
+                    detection = detector.detect(snapshot.left_image, snapshot.right_image)
+
+                left_det, left_valid, left_x, left_y = self._filter_detection(
+                    detection.left, self._kalman_left
+                )
+                right_det, right_valid, right_x, right_y = self._filter_detection(
+                    detection.right, self._kalman_right
+                )
+                detection.both_found = left_det.found and right_det.found
+
+                pos_3d: Optional[np.ndarray] = None
+                if left_valid and right_valid:
+                    pos_3d = triangulator.triangulate(
+                        left_point=(left_x, left_y), right_point=(right_x, right_y)
+                    )
+
+                if pos_3d is not None:
+                    predictor.add_measurement(
+                        x_mm=float(pos_3d[0]),
+                        y_mm=float(pos_3d[1]),
+                        z_mm=float(pos_3d[2]),
+                    )
+                    impact = predictor.get_impact_prediction()
+                else:
+                    if not self._kalman_left.is_initialized and not self._kalman_right.is_initialized:
+                        predictor.reset()
+                    impact = predictor.get_impact_prediction()
+
+                self._result_exchange.publish(
+                    TrackingState(
+                        source_sequence=snapshot.sequence,
+                        detection=detection,
+                        pos_3d=pos_3d,
+                        impact=impact,
+                        velocity_mm_s=predictor.estimated_velocity_mm_s,
+                        calibrated=triangulator.is_calibrated,
+                        completed_at=time.perf_counter(),
+                    )
+                )
+        except Exception as exc:
+            logger.exception("Detektáló szál hiba: %s", exc)
+            with self._error_lock:
+                self._error = str(exc)
+        finally:
+            with self._detector_lock:
+                self._detector = None
+            logger.info("Detektáló szál leállt")
+
+    @staticmethod
+    def _filter_detection(
+        detection: BallDetection, tracker: KalmanTracker2D
+    ) -> Tuple[BallDetection, bool, float, float]:
+        if detection.found:
+            x, y = tracker.update(detection.x, detection.y)
+            detection.x, detection.y = x, y
+            return detection, True, x, y
+
+        if tracker.is_initialized:
+            x, y = tracker.predict()
+            if x > 0 and y > 0:
+                radius = detection.radius if detection.radius > 0 else 25.0
+                detection.found = True
+                detection.x, detection.y = x, y
+                detection.radius = radius
+                detection.bbox = (x - radius, y - radius, x + radius, y + radius)
+                return detection, True, x, y
+
+        return detection, False, 0.0, 0.0
+
+    @staticmethod
+    def _make_roi(roi_cfg: dict) -> dict:
+        return {
+            "enabled": bool(roi_cfg.get("enabled", False)),
+            "x_min_rel": float(roi_cfg.get("x_min_rel", 0.0)),
+            "x_max_rel": float(roi_cfg.get("x_max_rel", 1.0)),
+            "y_min_rel": float(roi_cfg.get("y_min_rel", 0.0)),
+            "y_max_rel": float(roi_cfg.get("y_max_rel", 1.0)),
+        }
+
+
+class TrackerWorker(QThread):
+    frames_ready = pyqtSignal(np.ndarray, np.ndarray, dict)
+    error_occurred = pyqtSignal(str)
+    tracker_stopped = pyqtSignal()
+
+    def __init__(self, config: dict, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._config = config
+        self._running = False
+
+        self._cam_manager: Optional[CameraManager] = None
+        self._frame_exchange = LatestStereoFrame()
+        self._result_exchange = LatestTrackingState()
+        self._detection_worker: Optional[DetectionWorker] = None
+        self._snapshot_sequence = 0
+        self._last_frame_ids: Tuple[int, int] = (-1, -1)
+
+        roi_cfg = config.get("detection", {}).get("roi", {})
+        self._roi_lock = threading.Lock()
+        self._display_roi = {
+            "left": self._make_roi(roi_cfg),
+            "right": self._make_roi(roi_cfg),
+        }
+
         self._gui_fps_limit = float(config.get("gui", {}).get("gui_fps_limit", 60))
         self._gui_interval = 1.0 / self._gui_fps_limit
         self._last_gui_emit = 0.0
 
     def stop(self) -> None:
         self._running = False
+        self._frame_exchange.stop()
+        if self._detection_worker:
+            self._detection_worker.stop()
 
     @pyqtSlot(bool, int, int)
     def set_camera_offset(self, is_left: bool, offset_x: int, offset_y: int) -> None:
@@ -342,8 +592,20 @@ class TrackerWorker(QThread):
     def set_camera_roi(
         self, is_left: bool, enabled: bool, x_min_rel: float, x_max_rel: float, y_min_rel: float, y_max_rel: float
     ) -> None:
-        if self._detector:
-            self._detector.set_roi(is_left, enabled, x_min_rel, x_max_rel, y_min_rel, y_max_rel)
+        side = "left" if is_left else "right"
+        roi = {
+            "enabled": bool(enabled),
+            "x_min_rel": max(0.0, min(1.0, float(x_min_rel))),
+            "x_max_rel": max(0.0, min(1.0, float(x_max_rel))),
+            "y_min_rel": max(0.0, min(1.0, float(y_min_rel))),
+            "y_max_rel": max(0.0, min(1.0, float(y_max_rel))),
+        }
+        with self._roi_lock:
+            self._display_roi[side] = roi
+        if self._detection_worker:
+            self._detection_worker.set_roi(
+                is_left, enabled, x_min_rel, x_max_rel, y_min_rel, y_max_rel
+            )
 
     @pyqtSlot(bool, bool, bool, int)
     def set_camera_transform(self, is_left: bool, flip_h: bool, flip_v: bool, rotation: int) -> None:
@@ -356,15 +618,6 @@ class TrackerWorker(QThread):
 
         try:
             self._cam_manager = CameraManager(self._config)
-            self._detector = BallDetector(self._config["detection"], full_config=self._config)
-            self._triangulator = StereoTriangulator(self._config)
-            self._predictor = TrajectoryPredictor(self._config)
-
-            cal_file = self._config.get("stereo", {}).get(
-                "calibration_file", "data/calibration/stereo_calibration.npz"
-            )
-            self._triangulator.load_calibration(cal_file)
-
         except Exception as exc:
             error_msg = f"Komponens inicializálási hiba: {exc}"
             logger.error(error_msg)
@@ -377,6 +630,11 @@ class TrackerWorker(QThread):
             self.error_occurred.emit(error_msg)
             return
 
+        self._detection_worker = DetectionWorker(
+            self._config, self._frame_exchange, self._result_exchange
+        )
+        self._detection_worker.start()
+
         logger.info("TrackerWorker főciklus indítása...")
 
         try:
@@ -385,6 +643,10 @@ class TrackerWorker(QThread):
             logger.exception("Váratlan hiba: %s", exc)
             self.error_occurred.emit(str(exc))
         finally:
+            if self._detection_worker:
+                self._detection_worker.stop()
+                self._detection_worker.join(timeout=5.0)
+                self._detection_worker = None
             if self._cam_manager:
                 self._cam_manager.close()
             logger.info("TrackerWorker szál leállt")
@@ -394,93 +656,53 @@ class TrackerWorker(QThread):
         overlay_cfg = self._config.get("gui", {}).get("overlay", {})
 
         while self._running:
+            if self._detection_worker and self._detection_worker.error:
+                raise RuntimeError(f"Detektáló szál hiba: {self._detection_worker.error}")
+
             pair: StereoPair = self._cam_manager.read_stereo_pair()
             if not pair.success:
                 time.sleep(0.005)
                 continue
 
-            frame_left = pair.left.image.copy()
-            frame_right = pair.right.image.copy()
+            frame_ids = (pair.left.frame_id, pair.right.frame_id)
+            if frame_ids == self._last_frame_ids:
+                time.sleep(0.001)
+                continue
+            self._last_frame_ids = frame_ids
+            self._snapshot_sequence += 1
 
-            detection: StereoBallDetection = self._detector.detect(
-                pair.left.image, pair.right.image
+            # Ximea SDK buffers can be recycled by acquisition threads. One owned copy is
+            # therefore made at the pipeline boundary and shared read-only afterwards.
+            snapshot = StereoFrameSnapshot(
+                sequence=self._snapshot_sequence,
+                left_image=pair.left.image.copy(),
+                right_image=pair.right.image.copy(),
+                left_frame_id=pair.left.frame_id,
+                right_frame_id=pair.right.frame_id,
+                timestamp=pair.timestamp,
             )
-
-            left_det = detection.left
-            right_det = detection.right
-
-            left_valid = False
-            left_x, left_y = 0.0, 0.0
-            if left_det.found:
-                lx, ly = self._kalman_left.update(left_det.x, left_det.y)
-                left_det.x, left_det.y = lx, ly
-                left_x, left_y = lx, ly
-                left_valid = True
-            elif self._kalman_left.is_initialized:
-                lx, ly = self._kalman_left.predict()
-                if lx > 0 and ly > 0:
-                    r = left_det.radius if left_det.radius > 0 else 25.0
-                    left_det.found = True
-                    left_det.x, left_det.y = lx, ly
-                    left_det.radius = r
-                    left_det.bbox = (lx - r, ly - r, lx + r, ly + r)
-                    left_x, left_y = lx, ly
-                    left_valid = True
-
-            right_valid = False
-            right_x, right_y = 0.0, 0.0
-            if right_det.found:
-                rx, ry = self._kalman_right.update(right_det.x, right_det.y)
-                right_det.x, right_det.y = rx, ry
-                right_x, right_y = rx, ry
-                right_valid = True
-            elif self._kalman_right.is_initialized:
-                rx, ry = self._kalman_right.predict()
-                if rx > 0 and ry > 0:
-                    r = right_det.radius if right_det.radius > 0 else 25.0
-                    right_det.found = True
-                    right_det.x, right_det.y = rx, ry
-                    right_det.radius = r
-                    right_det.bbox = (rx - r, ry - r, rx + r, ry + r)
-                    right_x, right_y = rx, ry
-                    right_valid = True
-
-            pos_3d = None
-            if left_valid and right_valid:
-                pos_3d = self._triangulator.triangulate(
-                    left_point=(left_x, left_y),
-                    right_point=(right_x, right_y),
-                )
-
-            impact: Optional[ImpactPrediction] = None
-            if pos_3d is not None:
-                self._predictor.add_measurement(
-                    x_mm=float(pos_3d[0]),
-                    y_mm=float(pos_3d[1]),
-                    z_mm=float(pos_3d[2]),
-                )
-                impact = self._predictor.get_impact_prediction()
-            else:
-                # Predikátor reset CSAK ha mindkét 2D Kalman tracker teljesen leállt (elvesztette a labdát)
-                if not self._kalman_left.is_initialized and not self._kalman_right.is_initialized:
-                    self._predictor.reset()
-                else:
-                    impact = self._predictor.get_impact_prediction()
-
-
-            if self._detector:
-                self._detector.draw_roi(frame_left, is_left=True)
-                self._detector.draw_roi(frame_right, is_left=False)
-
-            if overlay_cfg.get("show_detection_box", True) and self._detector:
-                self._detector.draw_detection(frame_left, left_det)
-                self._detector.draw_detection(frame_right, right_det)
+            self._frame_exchange.publish(snapshot)
 
             now = time.perf_counter()
             if now - self._last_gui_emit >= self._gui_interval:
                 self._last_gui_emit = now
+                state = self._result_exchange.get()
+                frame_left = snapshot.left_image.copy()
+                frame_right = snapshot.right_image.copy()
+                self._draw_roi(frame_left, is_left=True)
+                self._draw_roi(frame_right, is_left=False)
+
+                left_det = state.detection.left if state else BallDetection()
+                right_det = state.detection.right if state else BallDetection()
+                if overlay_cfg.get("show_detection_box", True):
+                    self._draw_detection(frame_left, left_det)
+                    self._draw_detection(frame_right, right_det)
+
                 cam_status = self._cam_manager.get_camera_status()
-                vx, vy, vz = self._predictor.estimated_velocity_mm_s
+                vx, vy, vz = state.velocity_mm_s if state else (0.0, 0.0, 0.0)
+                pos_3d = state.pos_3d if state else None
+                impact = state.impact if state else None
+                detection = state.detection if state else StereoBallDetection()
 
                 stats = {
                     "cam_fps_left":  cam_status["fps_left"],
@@ -499,9 +721,56 @@ class TrackerWorker(QThread):
                     "vx_mms": vx, "vy_mms": vy, "vz_mms": vz,
                     "speed_ms": np.sqrt(vx**2 + vy**2 + vz**2) / 1000.0,
                     "impact": impact,
-                    "calibrated": self._triangulator.is_calibrated,
+                    "calibrated": state.calibrated if state else False,
+                    "detection_age_ms": (now - state.completed_at) * 1000.0 if state else 0.0,
+                    "detection_frame_lag": self._snapshot_sequence - state.source_sequence if state else 0,
                 }
                 self.frames_ready.emit(frame_left, frame_right, stats)
+
+    @staticmethod
+    def _make_roi(roi_cfg: dict) -> dict:
+        return {
+            "enabled": bool(roi_cfg.get("enabled", False)),
+            "x_min_rel": float(roi_cfg.get("x_min_rel", 0.0)),
+            "x_max_rel": float(roi_cfg.get("x_max_rel", 1.0)),
+            "y_min_rel": float(roi_cfg.get("y_min_rel", 0.0)),
+            "y_max_rel": float(roi_cfg.get("y_max_rel", 1.0)),
+        }
+
+    def _draw_roi(self, frame: np.ndarray, is_left: bool) -> None:
+        side = "left" if is_left else "right"
+        with self._roi_lock:
+            roi = self._display_roi[side].copy()
+        if not roi["enabled"]:
+            return
+        height, width = frame.shape[:2]
+        x1, x2 = int(width * roi["x_min_rel"]), int(width * roi["x_max_rel"])
+        y1, y2 = int(height * roi["y_min_rel"]), int(height * roi["y_max_rel"])
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+        cv2.putText(
+            frame, "ROI ACTIVE", (x1 + 6, max(y1 + 20, 22)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1,
+        )
+
+    @staticmethod
+    def _draw_detection(frame: np.ndarray, detection: BallDetection) -> None:
+        if not detection.found:
+            return
+        cx, cy, radius = int(detection.x), int(detection.y), int(detection.radius)
+        x1, y1, x2, y2 = [int(value) for value in detection.bbox]
+        color = (0, 255, 0)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
+        cv2.circle(frame, (cx, cy), radius, color, 2)
+        cv2.line(frame, (cx - radius, cy), (cx + radius, cy), color, 1)
+        cv2.line(frame, (cx, cy - radius), (cx, cy + radius), color, 1)
+        label_parts = [f"{detection.confidence:.2f}"]
+        if detection.track_id is not None:
+            label_parts.append(f"ID:{detection.track_id}")
+        cv2.putText(
+            frame, "  ".join(label_parts), (x1, y1 - 8),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
+        )
 
 
 # --------------------------------------------------------------------------- #

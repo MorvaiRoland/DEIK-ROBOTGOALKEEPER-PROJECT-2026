@@ -116,15 +116,23 @@ def test_cameras(config: dict, duration_s: float, show_frames: bool) -> bool:
     frame_count = 0
     t_start = time.perf_counter()
     fps_measurements = []
+    last_frame_ids = (-1, -1)
+    window_fps = 0.0
 
     fps_window_start = t_start
     fps_window_count = 0
 
     while (time.perf_counter() - t_start) < duration_s:
         pair = cam_manager.read_stereo_pair()
-        if pair.success:
+        frame_ids = (pair.left.frame_id, pair.right.frame_id)
+        if pair.success and frame_ids != last_frame_ids:
+            last_frame_ids = frame_ids
             frame_count += 1
             fps_window_count += 1
+        else:
+            # A CameraManager a legutolsó frame-et adja vissza, ezért nem
+            # számolhatjuk többször ugyanazt a képpárt valódi kamera FPS-nek.
+            time.sleep(0.0005)
 
         # FPS mérés 0.5 s ablakokban
         now = time.perf_counter()
@@ -174,8 +182,8 @@ def test_cameras(config: dict, duration_s: float, show_frames: bool) -> bool:
         print(f"  ✓ FPS rendben (cél: {target_fps:.0f} FPS, elért: {avg_fps:.1f} FPS)")
     else:
         print(f"  ⚠ FPS alacsony! (cél: {target_fps:.0f} FPS, elért: {avg_fps:.1f} FPS)")
-        print("    → Csökkentsd a bandwidth_limit_mbs értéket a config-ban")
-        print("    → Ellenőrizd, hogy mindkét kamera külön USB vezérlőn van-e")
+        print("    → Ellenőrizd az XiAPI naplózott 'elérhető' sávszélességét")
+        print("    → Ellenőrizd, hogy mindkét kamera külön USB root hubon van-e")
 
     # ── Kamera hőmérséklet ───────────────────────────────────────────
     print("[4/4] Kamera hőmérsékletek...")
