@@ -304,6 +304,12 @@ class TrackingState:
     velocity_mm_s: Tuple[float, float, float]
     calibrated: bool
     completed_at: float
+    
+    # Képre vetített (2D) trajektória pontok a vizualizációhoz
+    left_past_2d: Optional[np.ndarray] = None
+    right_past_2d: Optional[np.ndarray] = None
+    left_future_2d: Optional[np.ndarray] = None
+    right_future_2d: Optional[np.ndarray] = None
 
 
 class LatestStereoFrame:
@@ -477,6 +483,26 @@ class DetectionWorker(threading.Thread):
                         predictor.reset()
                     impact = predictor.get_impact_prediction()
 
+                # Trajektória pontok visszavetítése 2D-be (ha van kalibráció)
+                left_past, right_past = None, None
+                left_future, right_future = None, None
+                
+                if triangulator.is_calibrated:
+                    history_3d = predictor.get_trajectory_history_mm()
+                    if len(history_3d) >= 2:
+                        history_arr = np.array(history_3d)
+                        left_past = triangulator.project_to_2d(history_arr, is_left=True)
+                        right_past = triangulator.project_to_2d(history_arr, is_left=False)
+                        
+                    # Folyamatos 3D jövőbeli pálya kiszámítása (bármilyen mozgásirány esetén)
+                    future_path_3d = predictor.get_future_path_3d(num_points=20, max_time_s=1.5)
+                    if future_path_3d is None and impact is not None and impact.valid:
+                        future_path_3d = impact.path_3d
+
+                    if future_path_3d is not None:
+                        left_future = triangulator.project_to_2d(future_path_3d, is_left=True)
+                        right_future = triangulator.project_to_2d(future_path_3d, is_left=False)
+
                 self._result_exchange.publish(
                     TrackingState(
                         source_sequence=snapshot.sequence,
@@ -486,6 +512,10 @@ class DetectionWorker(threading.Thread):
                         velocity_mm_s=predictor.estimated_velocity_mm_s,
                         calibrated=triangulator.is_calibrated,
                         completed_at=time.perf_counter(),
+                        left_past_2d=left_past,
+                        right_past_2d=right_past,
+                        left_future_2d=left_future,
+                        right_future_2d=right_future,
                     )
                 )
         except Exception as exc:
@@ -697,6 +727,11 @@ class TrackerWorker(QThread):
                 if overlay_cfg.get("show_detection_box", True):
                     self._draw_detection(frame_left, left_det)
                     self._draw_detection(frame_right, right_det)
+                    
+                # 3D trajektória (múlt és jövő) vizualizációja
+                if state:
+                    self._draw_trajectory(frame_left, state.left_past_2d, state.left_future_2d)
+                    self._draw_trajectory(frame_right, state.right_past_2d, state.right_future_2d)
 
                 cam_status = self._cam_manager.get_camera_status()
                 vx, vy, vz = state.velocity_mm_s if state else (0.0, 0.0, 0.0)
@@ -771,6 +806,83 @@ class TrackerWorker(QThread):
             frame, "  ".join(label_parts), (x1, y1 - 8),
             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
         )
+
+    @staticmethod
+    def _draw_trajectory(
+        frame: np.ndarray,
+        past_2d: Optional[np.ndarray],
+        future_2d: Optional[np.ndarray]
+    ) -> None:
+        """
+        Kirajzolja a labda térbeli 3D trajektóriájának pontjait.
+        (Ideiglenesen kikapcsolva a felhasználó kérésére)
+        """
+        return
+
+        # Készítünk egy átlátszó réteget (overlay) a finom áttűnésekhez
+        overlay = frame.copy()
+        
+        # 1. Múltbeli pálya rajzolása (zöldeskék csóva, elvékonyodó)
+        if past_2d is not None and len(past_2d) >= 2:
+            n = len(past_2d)
+            for i in range(n - 1):
+                x1, y1 = past_2d[i, 0], past_2d[i, 1]
+                x2, y2 = past_2d[i+1, 0], past_2d[i+1, 1]
+                if np.isnan(x1) or np.isnan(y1) or np.isnan(x2) or np.isnan(y2):
+                    continue
+                if np.isinf(x1) or np.isinf(y1) or np.isinf(x2) or np.isinf(y2):
+                    continue
+                if abs(x1) > 10000 or abs(y1) > 10000 or abs(x2) > 10000 or abs(y2) > 10000:
+                    continue
+                    
+                # Ugrás elleni védelem: ha két pont túl messze van (pl. vak/zajos detektálás), nem kötjük össze!
+                if np.hypot(x2 - x1, y2 - y1) > 800.0:
+                    continue
+
+                pt1 = (int(x1), int(y1))
+                pt2 = (int(x2), int(y2))
+                
+                # Vastagság csökken a múltba haladva (i=n-1 a legújabb pont)
+                ratio = (i + 1) / n
+                color = (0, 255, 200)  # BGR: sárgászöld/világoszöld (citrus)
+                thickness = max(1, int(6 * ratio))
+                cv2.line(overlay, pt1, pt2, color, thickness, cv2.LINE_AA)
+                
+        # 2. Jövőbeli becsapódási pálya rajzolása (ciánkék ív, elvékonyodó)
+        if future_2d is not None and len(future_2d) >= 2:
+            n = len(future_2d)
+            for i in range(n - 1):
+                x1, y1 = future_2d[i, 0], future_2d[i, 1]
+                x2, y2 = future_2d[i+1, 0], future_2d[i+1, 1]
+                if np.isnan(x1) or np.isnan(y1) or np.isnan(x2) or np.isnan(y2):
+                    continue
+                if np.isinf(x1) or np.isinf(y1) or np.isinf(x2) or np.isinf(y2):
+                    continue
+                if abs(x1) > 10000 or abs(y1) > 10000 or abs(x2) > 10000 or abs(y2) > 10000:
+                    continue
+
+                if np.hypot(x2 - x1, y2 - y1) > 800.0:
+                    continue
+
+                pt1 = (int(x1), int(y1))
+                pt2 = (int(x2), int(y2))
+                
+                # Vastagság csökken a jövőbe haladva a becsapódás felé
+                ratio = 1.0 - (i / n)
+                color = (255, 200, 50)  # BGR: cián / világoskék
+                thickness = max(2, int(5 * ratio))
+                cv2.line(overlay, pt1, pt2, color, thickness, cv2.LINE_AA)
+
+            # Várható érkezési / landolási pont megjelölése célkereszttel
+            last_x, last_y = future_2d[-1, 0], future_2d[-1, 1]
+            if not np.isnan(last_x) and not np.isnan(last_y) and abs(last_x) < 10000 and abs(last_y) < 10000:
+                end_pt = (int(last_x), int(last_y))
+                cv2.circle(overlay, end_pt, 8, (255, 200, 50), 2, cv2.LINE_AA)
+                cv2.circle(overlay, end_pt, 3, (0, 255, 255), -1, cv2.LINE_AA)
+                
+        # Átlátszó (alpha blending) összekeverés az eredeti képpel
+        # overlay súlya 75%, eredeti kép súlya 25% -> a vonalak áttetszőek lesznek 75% opacitással.
+        cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
 
 
 # --------------------------------------------------------------------------- #

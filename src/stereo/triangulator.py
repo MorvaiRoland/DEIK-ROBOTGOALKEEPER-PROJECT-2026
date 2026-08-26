@@ -299,6 +299,13 @@ class StereoTriangulator:
                 pts_R.T.reshape(-1, 1, 2), self._K2, self._D2, P=self._P2
             ).reshape(2, -1)
 
+            # Epipoláris Y-illeszkedés ellenőrzése (rektifikált képeken a Y koordinátáknak kb. egyezniük kell)
+            y_L_rect = pts_L[1, 0]
+            y_R_rect = pts_R[1, 0]
+            if abs(y_L_rect - y_R_rect) > 150.0:  # 150 pixel feletti eltolás esetén nem ugyanaz az objektum!
+                logger.debug("triangulate: Epipoláris Y eltérés túl nagy (L_y=%.1f, R_y=%.1f)", y_L_rect, y_R_rect)
+                return None
+
         # Háromszögelés (Hartley-Sturm lineáris módszer)
         # Eredmény: 4×N homogén koordináták
         pts_4d = cv2.triangulatePoints(self._P1, self._P2, pts_L, pts_R)
@@ -373,6 +380,55 @@ class StereoTriangulator:
         rect_right = cv2.remap(frame_right, self._map1_R, self._map2_R, cv2.INTER_LINEAR)
 
         return rect_left, rect_right
+
+    # ------------------------------------------------------------------
+    # 2D Visszavetítés (Rajzoláshoz)
+    # ------------------------------------------------------------------
+
+    def project_to_2d(self, pts_3d_goal: np.ndarray, is_left: bool) -> Optional[np.ndarray]:
+        """
+        Kapu-koordinátarendszerben lévő 3D pontokat (N, 3) vetít vissza a 
+        kamera nyers 2D képére (N, 2).
+
+        Args:
+            pts_3d_goal: (N, 3) alakú NumPy tömb (X, Y, Z mm-ben)
+            is_left:     True = Bal kamera, False = Jobb kamera
+
+        Returns:
+            (N, 2) alakú NumPy tömb (x, y pixel koordináták), 
+            vagy None, ha nincs kalibrálva / hiba történt.
+        """
+        if not self._is_calibrated or pts_3d_goal is None or len(pts_3d_goal) == 0:
+            return None
+            
+        pts_3d_goal = np.atleast_2d(pts_3d_goal)
+            
+        # 1. Konvertálás a BAL kamera koordinátarendszerébe
+        X_cam = pts_3d_goal[:, 0] - self._left_cam_x_mm
+        Y_cam = self._cam_height_mm - pts_3d_goal[:, 1]
+        Z_cam = pts_3d_goal[:, 2] - self._cam_z_offset_mm
+        pts_3d_cam = np.column_stack((X_cam, Y_cam, Z_cam)).astype(np.float64)
+        
+        # 2. Vetítés a megfelelő kamerára
+        if is_left:
+            # Bal kamera a referencia, tehát az rvec és tvec 0
+            rvec = np.zeros((3, 1), dtype=np.float64)
+            tvec = np.zeros((3, 1), dtype=np.float64)
+            K = self._K1
+            D = self._D1
+        else:
+            # Jobb kamerához a bal-jobb transzformációs mátrix (R, T) kell
+            rvec, _ = cv2.Rodrigues(self._R)
+            tvec = self._T
+            K = self._K2
+            D = self._D2
+            
+        try:
+            pts_2d, _ = cv2.projectPoints(pts_3d_cam, rvec, tvec, K, D)
+            return pts_2d.reshape(-1, 2)
+        except Exception as exc:
+            logger.debug("Hiba a visszavetítés során: %s", exc)
+            return None
 
     # ------------------------------------------------------------------
     # Property-k

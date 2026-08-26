@@ -108,6 +108,7 @@ class ImpactPrediction:
         confidence:  Megbízhatóság [0.0 – 1.0]
         in_goal:     True ha a kapu keretén belül csapódik be
         valid:       True ha az előrejelzés érvényes
+        path_3d:     A jövőbeli pálya 3D pontjai (N, 3) a kirajzoláshoz
     """
     x_mm: float = 0.0
     y_mm: float = 0.0
@@ -115,6 +116,7 @@ class ImpactPrediction:
     confidence: float = 0.0
     in_goal: bool = False
     valid: bool = False
+    path_3d: Optional[np.ndarray] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -375,7 +377,7 @@ class TrajectoryPredictor:
                 y0=initial_state,
                 method="RK45",
                 events=goal_plane_event,
-                dense_output=False,
+                dense_output=True,
                 rtol=1e-4,   # Relatív tolerancia (pontosság vs. sebesség kompromisszum)
                 atol=1e-6,   # Abszolút tolerancia
             )
@@ -386,12 +388,21 @@ class TrajectoryPredictor:
                 x_impact_m = float(sol.y_events[0][0][0])
                 y_impact_m = float(sol.y_events[0][0][1])
 
+                # Jövőbeli pálya generálása a kirajzoláshoz (pl. 25 pont a jelenből a becsapódásig)
+                # Minimum 2 pont kell a linspace-hez
+                num_points = 25
+                t_eval = np.linspace(0.0, t_impact, num=num_points)
+                y_eval = sol.sol(t_eval) # Shape: (6, 25)
+                path_3d_m = y_eval[:3, :].T # Shape: (25, 3)
+                path_3d_mm = path_3d_m * M_TO_MM
+
                 return ImpactPrediction(
                     x_mm=x_impact_m * M_TO_MM,
                     y_mm=y_impact_m * M_TO_MM,
                     time_to_impact_s=t_impact,
                     confidence=0.0,  # Confidence-t majd kívül számítjuk
                     valid=True,
+                    path_3d=path_3d_mm
                 )
             else:
                 # Nem érte el a kapuvonalat (pl. mellé megy)
@@ -555,3 +566,79 @@ class TrajectoryPredictor:
             Lista (x_mm, y_mm, z_mm) tupleokból
         """
         return [(p.x, p.y, p.z) for p in self._history]
+
+    def get_future_path_3d(self, num_points: int = 20, max_time_s: float = 1.5) -> Optional[np.ndarray]:
+        """
+        Folyamatosan kiszámítja a labda jövőbeli 3D pályáját a jelenlegi 
+        Kalman szűrő pozíciójából és sebességvektorából.
+
+        Nem követeli meg a szigorú kapura lövést vagy kapu-metszést; 
+        bármilyen irányú mozgásnál folyamatosan kirajzolja a várható ívet 
+        (légellenállással és gravitációval).
+
+        Args:
+            num_points: Mintavételezési pontok száma
+            max_time_s: Hány másodpercre előre szimuláljunk
+
+        Returns:
+            (num_points, 3) tömb mm-ben, vagy None ha a labda mozdulatlan / nincs elég adat.
+        """
+        if not self._kalman_initialized or len(self._history) < 2:
+            return None
+
+        x0, y0, z0 = self._kalman_state[0:3]
+        vx0, vy0, vz0 = self._kalman_state[3:6]
+
+        speed = np.sqrt(vx0**2 + vy0**2 + vz0**2)
+        if speed < 150.0:  # Ha a labda sebessége kisebb mint 0.15 m/s (szinte áll), nem rajzolunk jövőbeli vonalat
+            return None
+
+        MM_TO_M = 1e-3
+        M_TO_MM = 1e3
+
+        pos0_m = np.array([x0, y0, z0]) * MM_TO_M
+        vel0_ms = np.array([vx0, vy0, vz0]) * MM_TO_M
+        g_ms2 = self._gravity_mm_s2 * MM_TO_M
+        drag_factor = self._drag_factor
+
+        def equations_of_motion(t, state):
+            _, _, _, vx, vy, vz = state
+            v = np.array([vx, vy, vz])
+            v_norm = np.linalg.norm(v)
+            drag_accel = -drag_factor * v_norm * v if v_norm > 1e-10 else np.zeros(3)
+            ax = drag_accel[0]
+            ay = -g_ms2 + drag_accel[1]
+            az = drag_accel[2]
+            return [vx, vy, vz, ax, ay, az]
+
+        def ground_event(t, state):
+            # Megállunk a szimulációval ha eléri a talajt (Y <= 0)
+            return state[1]
+
+        ground_event.terminal = True
+        ground_event.direction = -1
+
+        initial_state = [pos0_m[0], pos0_m[1], pos0_m[2], vel0_ms[0], vel0_ms[1], vel0_ms[2]]
+
+        try:
+            sol = solve_ivp(
+                equations_of_motion,
+                t_span=(0.0, max_time_s),
+                y0=initial_state,
+                method="RK45",
+                events=ground_event,
+                dense_output=True,
+                rtol=1e-3,
+                atol=1e-5,
+            )
+
+            t_end = sol.t[-1]
+            if t_end < 0.05:
+                return None
+
+            t_eval = np.linspace(0.0, t_end, num=num_points)
+            y_eval = sol.sol(t_eval)
+            path_3d_m = y_eval[:3, :].T
+            return path_3d_m * M_TO_MM
+        except Exception:
+            return None

@@ -314,22 +314,10 @@ class BallDetector:
         right_proc, right_roi_offset = self._apply_roi(frame_right, is_left=False)
 
         # --- YOLO inferencia ---
-        # Ha tracking engedélyezett: model.track() → ByteTrack ID-k
-        # Ha nem: model() → csak detektálás
+        # model() → csak detektálás, ByteTrack nélkül (gyorsabb)
+        # stream=True: TensorRT GPU pipeline mód – csökkenti a GPU→CPU lateónciát
         if self._tracking_enabled:
-            results = self._model.track(
-                [left_proc, right_proc],   # Batch: mindkét kép egyszerre
-                device=self._device,
-                verbose=False,
-                imgsz=self._input_size,
-                conf=self._confidence_threshold,
-                iou=self._iou_threshold,
-                classes=[self._ball_class_id],   # Csak "sports ball"
-                tracker=self._tracker_config,
-                persist=True,                    # Megőrzi a track state-et frame-ek között
-            )
-        else:
-            results = self._model(
+            results = list(self._model.track(
                 [left_proc, right_proc],
                 device=self._device,
                 verbose=False,
@@ -337,7 +325,21 @@ class BallDetector:
                 conf=self._confidence_threshold,
                 iou=self._iou_threshold,
                 classes=[self._ball_class_id],
-            )
+                tracker=self._tracker_config,
+                persist=True,
+                stream=True,
+            ))
+        else:
+            results = list(self._model(
+                [left_proc, right_proc],
+                device=self._device,
+                verbose=False,
+                imgsz=self._input_size,
+                conf=self._confidence_threshold,
+                iou=self._iou_threshold,
+                classes=[self._ball_class_id],
+                stream=True,
+            ))
 
         # --- Eredmények kinyerése (YOLO detektálás) ---
         det_left = self._extract_best_ball(
@@ -385,6 +387,8 @@ class BallDetector:
 
         Ezt használjuk, ha a YOLO modell nem detektálja a labdát a levegőben
         (pl. hiányzó talaj-kontextus miatt).
+        
+        Teljesítmény-optimalizált: 50%-os leméretezést használ a gyorsabb CPU feldolgozáshoz.
 
         Args:
             frame:      BGR kép
@@ -396,8 +400,13 @@ class BallDetector:
         ox, oy = roi_offset
         h, w = frame.shape[:2]
 
+        # --- OPTIMALIZÁCIÓ: 50%-os leméretezés a gyorsabb HSV és morfológiai műveletekhez ---
+        scale = 0.5
+        inv_scale = 1.0 / scale
+        small_frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+
         # BGR → HSV konverzió
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(small_frame, cv2.COLOR_BGR2HSV)
 
         # Narancssárga maszk létrehozása (a konfigurációban megadott HSV határok alapján)
         lower = np.array([self._hsv_h_min, self._hsv_s_min, self._hsv_v_min], dtype=np.uint8)
@@ -405,7 +414,8 @@ class BallDetector:
         mask = cv2.inRange(hsv, lower, upper)
 
         # Morfológiai szűrés (zajcsökkentés és lyukkitöltés)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        # Kisebb kernel a leméretezett képhez (3x3 a korábbi 5x5 helyett)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
 
@@ -414,11 +424,14 @@ class BallDetector:
 
         best_candidate = None
         best_score = -1.0
+        
+        small_w = w * scale
+        small_h = h * scale
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            # Finomhangolt terület küszöb (min. 120 px^2): távoli és gyorsan mozgó labdákat is folyamatosan követ
-            if area < 120 or area > (w * h * 0.18):
+            # Terület küszöbök leméretezve (eredeti min. 120 -> 30, max. 18% terület)
+            if area < (120 * scale**2) or area > (small_w * small_h * 0.18):
                 continue
 
             perimeter = cv2.arcLength(cnt, True)
@@ -448,7 +461,8 @@ class BallDetector:
                 continue
 
             (x, y), radius = cv2.minEnclosingCircle(cnt)
-            if radius < 6.0 or radius > 160.0:  # Sugár szűrés (min. 6.0 px)
+            # Sugár szűrés leméretezve (eredeti 6.0..160.0 -> 3.0..80.0)
+            if radius < (6.0 * scale) or radius > (160.0 * scale):
                 continue
 
             # Szaturáció átlagának kiszámítása a kontúron belül
@@ -461,15 +475,19 @@ class BallDetector:
                 continue
 
             # Pontszámítás: (Körkörösség négyzete) * Tömörség * (Szaturáció aránya)
-            # Direkt KIVETTÜK az 'area'-t a szorzóból, nehogy egy hatalmas, de kevésbé
-            # kerek / halványabb háttérelem (pl. kartondoboz) túlpontozza a labdát!
             score = (circularity ** 2) * solidity * (mean_s / 255.0)
             if score > best_score:
                 best_score = score
                 best_candidate = (x, y, radius, area, circularity)
 
         if best_candidate is not None:
-            x, y, radius, area, circ = best_candidate
+            x_small, y_small, radius_small, area_small, circ = best_candidate
+            
+            # Visszaszorzás az eredeti felbontásra
+            x = x_small * inv_scale
+            y = y_small * inv_scale
+            radius = radius_small * inv_scale
+            
             x1 = x - radius + ox
             y1 = y - radius + oy
             x2 = x + radius + ox

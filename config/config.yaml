@@ -203,15 +203,15 @@ ball:
 # =============================================================================
 detection:
   # ----- Modell Választás -----
-  # "models/yolov10n_custom_640.engine" → Labda-specifikus TensorRT modell (350 FPS, AJÁNLOTT!)
-  model_path: "models/yolov8n.engine"
+  # "rtdetr-l.engine" → Real-Time Detection Transformer (RT-DETR) TensorRT batch=2 GPU modell
+  model_path: "rtdetr-l.engine"
 
-  # Custom modell osztály ID: 0 (egyetlen osztály: labda)
+  # COCO modell osztály ID: 32 (sports ball)
   ball_class_id: 32
 
   # Detektálási megbízhatósági küszöb (0.0 – 1.0)
-  # 0.15: Érzékeny beállítás, hogy a 20-50%-os konfidenciájú detektálásokat is elfogadja!
-  confidence_threshold: 0.15
+  # 0.20: Megfeleloen érzékeny a custom 1-osztályos modellhez
+  confidence_threshold: 0.20
 
   # IoU küszöb NMS-hez (Non-Maximum Suppression) – YOLOv10 ezt belülről kezeli
   iou_threshold: 0.45
@@ -223,11 +223,11 @@ detection:
   device: "cuda:0"
 
   # ByteTrack konfiguráció (automatikus multi-object tracking)
+  # KIKAPCSOLVA: model.track() stateful trackinget futtat és jelentős overhead-et okoz.
+  # A 2D Kalman szűrő (kalman szekció lent) már elvégzi a simítást – ByteTrack felesleges.
   tracking:
-    enabled: true
-    # Tracker konfig fájl (ultralytics beépített)
+    enabled: false
     tracker_config: "bytetrack.yaml"
-    # Hány frame-en "tartja ki" a tracker ha a detektor nem talál labdát
     max_lost_frames: 15
 
   # ----- Kalman szűrő (2D per-camera simítás) -----
