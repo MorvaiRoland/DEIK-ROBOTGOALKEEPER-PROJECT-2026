@@ -97,6 +97,12 @@ _BTN_SEC = (
     "QPushButton:hover { background-color: #E2E8F0; color: #0F5132; }"
     "QPushButton:disabled { background-color: #F8FAFC; color: #CBD5E1; }"
 )
+_BTN_SEC_DARK = (
+    "QPushButton { background-color: #151D2A; color: #94A3B8; font-weight: 700; "
+    "border-radius: 6px; font-size: 12px; border: 1px solid #26334D; padding: 7px 16px; }"
+    "QPushButton:hover { background-color: #1E293B; color: #10B981; border-color: #10B981; }"
+    "QPushButton:disabled { background-color: #0B0F17; color: #475569; border-color: #26334D; }"
+)
 _BTN_CAPTURE = (
     "QPushButton { background-color: #D97706; color: #FFFFFF; font-weight: 900; "
     "border-radius: 6px; font-size: 13px; border: none; padding: 8px 20px; }"
@@ -460,42 +466,73 @@ class CalibrationDialog(QDialog):
       ③ Kalibrálás  – futtatás, log, eredmény, mentés .npz-be
     """
 
-    def __init__(self, config: dict, parent=None):
+    def __init__(self, config: dict, is_dark: bool = False, parent=None):
         super().__init__(parent)
         self._config         = config
+        self._is_dark        = is_dark
         self._capture_worker: Optional[CalibrationCaptureWorker] = None
         self._run_worker:     Optional[CalibrationRunWorker]     = None
         self._last_result:    Optional[dict]                     = None
 
         self.setWindowTitle("DEIK – Sztereó Kalibrációs Munkafolyamat")
         self.setMinimumSize(900, 620)
-        self.setStyleSheet(
-            "QDialog, QWidget { background-color: #F8FAFC; color: #0F172A; "
-            "font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }"
-            "QGroupBox { background-color: #FFFFFF; border: 1px solid #CBD5E1; "
-            "border-radius: 8px; margin-top: 18px; padding: 16px 12px 12px 12px; font-weight: 700; }"
-            "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; "
-            "left: 12px; top: 0px; padding: 4px 12px; background-color: #0F5132; color: #FFFFFF; "
-            "border-radius: 4px; font-size: 12px; font-weight: 800; }"
-            "QTabWidget::pane { border: 1px solid #CBD5E1; border-radius: 6px; "
-            "background: #F8FAFC; }"
-            "QTabBar::tab { background: #E2E8F0; color: #334155; border: 1px solid #CBD5E1; "
-            "padding: 10px 22px; border-top-left-radius: 6px; border-top-right-radius: 6px; "
-            "font-weight: 700; font-size: 13px; margin-right: 4px; }"
-            "QTabBar::tab:selected { background: #0F5132; color: #FFFFFF; border-bottom: none; }"
-            "QTabBar::tab:hover:!selected { background: #CBD5E1; color: #0F5132; }"
-            "QSpinBox, QDoubleSpinBox, QLineEdit { border: 1px solid #CBD5E1; "
-            "border-radius: 6px; padding: 5px 10px; background: #FFFFFF; min-height: 28px; color: #0F172A; font-weight: 600; }"
-            "QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus { border: 2px solid #0F5132; }"
-            "QProgressBar { border: 1px solid #CBD5E1; border-radius: 6px; "
-            "background: #F1F5F9; height: 24px; text-align: center; font-weight: 700; color: #0F172A; }"
-            "QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-            "stop:0 #0F5132, stop:1 #16A34A); border-radius: 5px; }"
-            "QPlainTextEdit { background: #0F172A; color: #A3E635; "
-            "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; "
-            "border-radius: 6px; padding: 8px; }"
-            "QLabel { color: #0F172A; }"
-        )
+        
+        if self._is_dark:
+            self.setStyleSheet(
+                "QDialog, QWidget { background-color: #0B0F17; color: #F8FAFC; "
+                "font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }"
+                "QGroupBox { background-color: #151D2A; border: 1px solid #26334D; "
+                "border-radius: 8px; margin-top: 18px; padding: 16px 12px 12px 12px; font-weight: 700; color: #F8FAFC; }"
+                "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; "
+                "left: 12px; top: 0px; padding: 4px 12px; background-color: #0F5132; color: #FFFFFF; "
+                "border-radius: 4px; font-size: 12px; font-weight: 800; }"
+                "QTabWidget::pane { border: 1px solid #26334D; border-radius: 6px; "
+                "background: #0B0F17; }"
+                "QTabBar::tab { background: #151D2A; color: #94A3B8; border: 1px solid #26334D; "
+                "padding: 10px 22px; border-top-left-radius: 6px; border-top-right-radius: 6px; "
+                "font-weight: 700; font-size: 13px; margin-right: 4px; }"
+                "QTabBar::tab:selected { background: #0F5132; color: #FFFFFF; border-bottom: none; }"
+                "QTabBar::tab:hover:!selected { background: #1E293B; color: #10B981; }"
+                "QSpinBox, QDoubleSpinBox, QLineEdit { border: 1px solid #26334D; "
+                "border-radius: 6px; padding: 5px 10px; background: #1E293B; min-height: 28px; color: #F8FAFC; font-weight: 600; }"
+                "QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus { border: 2px solid #10B981; }"
+                "QProgressBar { border: 1px solid #26334D; border-radius: 6px; "
+                "background: #151D2A; height: 24px; text-align: center; font-weight: 700; color: #F8FAFC; }"
+                "QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+                "stop:0 #0F5132, stop:1 #10B981); border-radius: 5px; }"
+                "QPlainTextEdit { background: #020617; color: #10B981; "
+                "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; "
+                "border-radius: 6px; padding: 8px; border: 1px solid #26334D; }"
+                "QLabel { color: #F8FAFC; }"
+            )
+        else:
+            self.setStyleSheet(
+                "QDialog, QWidget { background-color: #F8FAFC; color: #0F172A; "
+                "font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }"
+                "QGroupBox { background-color: #FFFFFF; border: 1px solid #CBD5E1; "
+                "border-radius: 8px; margin-top: 18px; padding: 16px 12px 12px 12px; font-weight: 700; }"
+                "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; "
+                "left: 12px; top: 0px; padding: 4px 12px; background-color: #0F5132; color: #FFFFFF; "
+                "border-radius: 4px; font-size: 12px; font-weight: 800; }"
+                "QTabWidget::pane { border: 1px solid #CBD5E1; border-radius: 6px; "
+                "background: #F8FAFC; }"
+                "QTabBar::tab { background: #E2E8F0; color: #334155; border: 1px solid #CBD5E1; "
+                "padding: 10px 22px; border-top-left-radius: 6px; border-top-right-radius: 6px; "
+                "font-weight: 700; font-size: 13px; margin-right: 4px; }"
+                "QTabBar::tab:selected { background: #0F5132; color: #FFFFFF; border-bottom: none; }"
+                "QTabBar::tab:hover:!selected { background: #CBD5E1; color: #0F5132; }"
+                "QSpinBox, QDoubleSpinBox, QLineEdit { border: 1px solid #CBD5E1; "
+                "border-radius: 6px; padding: 5px 10px; background: #FFFFFF; min-height: 28px; color: #0F172A; font-weight: 600; }"
+                "QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus { border: 2px solid #0F5132; }"
+                "QProgressBar { border: 1px solid #CBD5E1; border-radius: 6px; "
+                "background: #F1F5F9; height: 24px; text-align: center; font-weight: 700; color: #0F172A; }"
+                "QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+                "stop:0 #0F5132, stop:1 #16A34A); border-radius: 5px; }"
+                "QPlainTextEdit { background: #0F172A; color: #A3E635; "
+                "font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; "
+                "border-radius: 6px; padding: 8px; }"
+                "QLabel { color: #0F172A; }"
+            )
         self._build_ui()
 
     def _wrap_in_scroll(self, widget: QWidget) -> QScrollArea:
@@ -518,19 +555,19 @@ class CalibrationDialog(QDialog):
 
         # Fejléc
         hdr = QLabel("⚙  DEIK Sztereó Kalibrációs Munkafolyamat")
-        hdr.setStyleSheet("font-size: 18px; font-weight: 900; color: #0F5132; padding: 2px 0;")
+        hdr.setStyleSheet("font-size: 18px; font-weight: 900; color: #4ADE80; padding: 2px 0;" if self._is_dark else "font-size: 18px; font-weight: 900; color: #0F5132; padding: 2px 0;")
         root.addWidget(hdr)
 
         sub = QLabel(
             "Lépések: ① Beállítások  →  "
             "② Pozíció beállítás  →  ③ Képrögzítés  →  ④ Kalibrálás."
         )
-        sub.setStyleSheet("color: #475569; font-size: 12px; font-weight: 600;")
+        sub.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: 600;" if self._is_dark else "color: #475569; font-size: 12px; font-weight: 600;")
         root.addWidget(sub)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #CBD5E1;")
+        sep.setStyleSheet("color: #26334D;" if self._is_dark else "color: #CBD5E1;")
         root.addWidget(sep)
 
         self._tabs = QTabWidget()
@@ -543,7 +580,7 @@ class CalibrationDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
         btn_close = QPushButton("✕  Bezárás")
-        btn_close.setStyleSheet(_BTN_SEC)
+        btn_close.setStyleSheet(_BTN_SEC_DARK if self._is_dark else _BTN_SEC)
         btn_close.clicked.connect(self._on_close_clicked)
         btn_row.addWidget(btn_close)
         root.addLayout(btn_row)
@@ -562,7 +599,7 @@ class CalibrationDialog(QDialog):
 
         def flbl(txt):
             l = QLabel(txt)
-            l.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 13px;")
+            l.setStyleSheet("font-weight: 700; color: #F8FAFC; font-size: 13px;" if self._is_dark else "font-weight: 700; color: #0F172A; font-size: 13px;")
             return l
 
         # Sakktábla paraméterek
@@ -576,8 +613,9 @@ class CalibrationDialog(QDialog):
             "Ha eltérő táblát használsz, módosítsd az alábbi értékeket."
         )
         info.setStyleSheet(
-            "background: #ECFDF5; border: 1px solid #6EE7B7; border-radius: 6px; "
-            "padding: 10px; color: #065F46; font-size: 13px; line-height: 1.4;"
+            "background: #064E3B; border: 1px solid #10B981; border-radius: 6px; padding: 10px; color: #D1FAE5; font-size: 13px; line-height: 1.4;"
+            if self._is_dark else
+            "background: #ECFDF5; border: 1px solid #6EE7B7; border-radius: 6px; padding: 10px; color: #065F46; font-size: 13px; line-height: 1.4;"
         )
         info.setWordWrap(True)
         cb_form.addRow("", info)
@@ -595,9 +633,9 @@ class CalibrationDialog(QDialog):
         self._spin_cy.setMinimumWidth(100)
 
         lbl_cx = QLabel("Vízszintes (X):")
-        lbl_cx.setStyleSheet("font-weight: 600; color: #334155;")
+        lbl_cx.setStyleSheet("font-weight: 600; color: #CBD5E1;" if self._is_dark else "font-weight: 600; color: #334155;")
         lbl_cy = QLabel("Függőleges (Y):")
-        lbl_cy.setStyleSheet("font-weight: 600; color: #334155;")
+        lbl_cy.setStyleSheet("font-weight: 600; color: #CBD5E1;" if self._is_dark else "font-weight: 600; color: #334155;")
 
         corners_row = QHBoxLayout()
         corners_row.addWidget(lbl_cx)
@@ -634,9 +672,9 @@ class CalibrationDialog(QDialog):
         def glbl(v, u="mm"):
             l = QLabel(f"{v} {u}")
             l.setStyleSheet(
-                "background: #F1F5F9; color: #0F5132; font-weight: 800; "
-                "font-size: 13px; font-family: Consolas, monospace; "
-                "border: 1px solid #CBD5E1; border-radius: 4px; padding: 3px 10px;"
+                "background: #1E293B; color: #10B981; font-weight: 800; font-size: 13px; font-family: Consolas, monospace; border: 1px solid #26334D; border-radius: 4px; padding: 3px 10px;"
+                if self._is_dark else
+                "background: #F1F5F9; color: #0F5132; font-weight: 800; font-size: 13px; font-family: Consolas, monospace; border: 1px solid #CBD5E1; border-radius: 4px; padding: 3px 10px;"
             )
             return l
 
@@ -661,7 +699,7 @@ class CalibrationDialog(QDialog):
         self._edit_out = QLineEdit(default_out)
 
         btn_browse = QPushButton("Tallózás…")
-        btn_browse.setStyleSheet(_BTN_SEC)
+        btn_browse.setStyleSheet(_BTN_SEC_DARK if self._is_dark else _BTN_SEC)
         btn_browse.clicked.connect(self._on_browse)
 
         row = QHBoxLayout()
@@ -696,14 +734,16 @@ class CalibrationDialog(QDialog):
         top_row = QHBoxLayout()
         self._lbl_align_status = QLabel("⏸ Kamera inaktív – Indítsd el a kamerát a pozíció beállításához")
         self._lbl_align_status.setStyleSheet(
-            "background: #F1F5F9; color: #475569; font-weight: 700; "
-            "border-radius: 6px; padding: 8px 14px; font-size: 13px;"
+            "background: #1E293B; color: #94A3B8; font-weight: 700; border-radius: 6px; padding: 8px 14px; font-size: 13px;"
+            if self._is_dark else
+            "background: #F1F5F9; color: #475569; font-weight: 700; border-radius: 6px; padding: 8px 14px; font-size: 13px;"
         )
 
         self._lbl_align_score = QLabel(" Pontszám: — % ")
         self._lbl_align_score.setStyleSheet(
-            "font-weight: 900; font-size: 15px; color: #0F5132; padding: 4px 14px; "
-            "background: #ECFDF5; border: 1px solid #6EE7B7; border-radius: 6px;"
+            "font-weight: 900; font-size: 15px; color: #4ADE80; padding: 4px 14px; background: #064E3B; border: 1px solid #10B981; border-radius: 6px;"
+            if self._is_dark else
+            "font-weight: 900; font-size: 15px; color: #0F5132; padding: 4px 14px; background: #ECFDF5; border: 1px solid #6EE7B7; border-radius: 6px;"
         )
         top_row.addWidget(self._lbl_align_status, stretch=1)
         top_row.addWidget(self._lbl_align_score)
@@ -744,7 +784,7 @@ class CalibrationDialog(QDialog):
         left_grp = QGroupBox("📷 BAL KAMERA IGAZÍTÁSI UTASÍTÁSOK")
         self._left_instr_box = QVBoxLayout(left_grp)
         self._lbl_left_instr = QLabel("Indítsd el a kamerát a méréshez…")
-        self._lbl_left_instr.setStyleSheet("color: #475569; font-weight: 600; padding: 6px;")
+        self._lbl_left_instr.setStyleSheet("color: #94A3B8; font-weight: 600; padding: 6px;" if self._is_dark else "color: #475569; font-weight: 600; padding: 6px;")
         self._lbl_left_instr.setWordWrap(True)
         self._left_instr_box.addWidget(self._lbl_left_instr)
         instr_row.addWidget(left_grp, stretch=1)
@@ -752,7 +792,7 @@ class CalibrationDialog(QDialog):
         right_grp = QGroupBox("📷 JOBB KAMERA IGAZÍTÁSI UTASÍTÁSOK")
         self._right_instr_box = QVBoxLayout(right_grp)
         self._lbl_right_instr = QLabel("Indítsd el a kamerát a méréshez…")
-        self._lbl_right_instr.setStyleSheet("color: #475569; font-weight: 600; padding: 6px;")
+        self._lbl_right_instr.setStyleSheet("color: #94A3B8; font-weight: 600; padding: 6px;" if self._is_dark else "color: #475569; font-weight: 600; padding: 6px;")
         self._lbl_right_instr.setWordWrap(True)
         self._right_instr_box.addWidget(self._lbl_right_instr)
         instr_row.addWidget(right_grp, stretch=1)
@@ -767,7 +807,7 @@ class CalibrationDialog(QDialog):
         self._btn_start_align.clicked.connect(self._on_start_camera)
 
         self._btn_stop_align = QPushButton("⏹  Leállítás")
-        self._btn_stop_align.setStyleSheet(_BTN_SEC)
+        self._btn_stop_align.setStyleSheet(_BTN_SEC_DARK if self._is_dark else _BTN_SEC)
         self._btn_stop_align.setMinimumHeight(38)
         self._btn_stop_align.setEnabled(False)
         self._btn_stop_align.clicked.connect(self._on_stop_camera)
@@ -795,11 +835,12 @@ class CalibrationDialog(QDialog):
             f"border: 1px solid {res.status_color}; border-radius: 6px; padding: 8px 14px; font-size: 13px;"
         )
 
+        text_color = "#F8FAFC" if self._is_dark else "#0F172A"
         left_html = ""
         for ins in res.left_instructions:
             color = "#10B981" if ins.severity == "ok" else ("#D97706" if ins.severity == "warning" else "#DC2626")
             left_html += (
-                f"<div style='margin-bottom: 6px; font-size: 13px; color: #0F172A;'>"
+                f"<div style='margin-bottom: 6px; font-size: 13px; color: {text_color};'>"
                 f"<span style='font-size: 16px;'>{ins.icon}</span> &nbsp;"
                 f"<b style='color: {color};'>[{ins.value_str}]</b> {ins.text}"
                 f"</div>"
@@ -810,7 +851,7 @@ class CalibrationDialog(QDialog):
         for ins in res.right_instructions:
             color = "#10B981" if ins.severity == "ok" else ("#D97706" if ins.severity == "warning" else "#DC2626")
             right_html += (
-                f"<div style='margin-bottom: 6px; font-size: 13px; color: #0F172A;'>"
+                f"<div style='margin-bottom: 6px; font-size: 13px; color: {text_color};'>"
                 f"<span style='font-size: 16px;'>{ins.icon}</span> &nbsp;"
                 f"<b style='color: {color};'>[{ins.value_str}]</b> {ins.text}"
                 f"</div>"
@@ -829,13 +870,15 @@ class CalibrationDialog(QDialog):
         status_row = QHBoxLayout()
         self._lbl_status = QLabel("⏸  Kamera inaktív – kattints a START gombra")
         self._lbl_status.setStyleSheet(
-            "background: #FEF3C7; color: #92400E; font-weight: 700; "
-            "border-radius: 6px; padding: 8px 14px; font-size: 13px;"
+            "background: #451A03; color: #FCD34D; font-weight: 700; border-radius: 6px; padding: 8px 14px; font-size: 13px;"
+            if self._is_dark else
+            "background: #FEF3C7; color: #92400E; font-weight: 700; border-radius: 6px; padding: 8px 14px; font-size: 13px;"
         )
         self._lbl_count = QLabel("0 / 20  képpár")
         self._lbl_count.setStyleSheet(
-            "font-weight: 900; font-size: 14px; color: #0F5132; padding: 4px 12px; "
-            "background: #ECFDF5; border: 1px solid #6EE7B7; border-radius: 6px;"
+            "font-weight: 900; font-size: 14px; color: #4ADE80; padding: 4px 12px; background: #064E3B; border: 1px solid #10B981; border-radius: 6px;"
+            if self._is_dark else
+            "font-weight: 900; font-size: 14px; color: #0F5132; padding: 4px 12px; background: #ECFDF5; border: 1px solid #6EE7B7; border-radius: 6px;"
         )
         status_row.addWidget(self._lbl_status, stretch=1)
         status_row.addWidget(self._lbl_count)
@@ -864,8 +907,9 @@ class CalibrationDialog(QDialog):
             f"<b>JOBB:</b> {r_exp} µs / {r_gain:.1f} dB"
         )
         lbl_settings_info.setStyleSheet(
-            "background: #F1F5F9; color: #0F5132; border: 1px solid #CBD5E1; "
-            "border-radius: 6px; padding: 6px 12px; font-size: 12px;"
+            "background: #1E293B; color: #4ADE80; border: 1px solid #26334D; border-radius: 6px; padding: 6px 12px; font-size: 12px;"
+            if self._is_dark else
+            "background: #F1F5F9; color: #0F5132; border: 1px solid #CBD5E1; border-radius: 6px; padding: 6px 12px; font-size: 12px;"
         )
         ly.addWidget(lbl_settings_info)
 
@@ -902,7 +946,7 @@ class CalibrationDialog(QDialog):
         self._btn_start.clicked.connect(self._on_start_camera)
 
         self._btn_stop = QPushButton("⏹  Leállítás")
-        self._btn_stop.setStyleSheet(_BTN_SEC)
+        self._btn_stop.setStyleSheet(_BTN_SEC_DARK if self._is_dark else _BTN_SEC)
         self._btn_stop.setMinimumHeight(38)
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._on_stop_camera)
@@ -931,7 +975,7 @@ class CalibrationDialog(QDialog):
             "Szükséges: legalább 15–20 képpár a pontos kalibráláshoz."
         )
         tip.setWordWrap(True)
-        tip.setStyleSheet("color: #475569; font-size: 12px; padding: 4px; font-weight: 500;")
+        tip.setStyleSheet("color: #94A3B8; font-size: 12px; padding: 4px; font-weight: 500;" if self._is_dark else "color: #475569; font-size: 12px; padding: 4px; font-weight: 500;")
         ly.addWidget(tip)
 
         # NEM kerül ScrollArea-ba: a ScrollArea setWidgetResizable(True) módban
@@ -971,12 +1015,12 @@ class CalibrationDialog(QDialog):
 
         def rl():
             l = QLabel("—")
-            l.setStyleSheet("font-weight: 800; font-size: 14px; font-family: Consolas, monospace; color: #0F172A;")
+            l.setStyleSheet("font-weight: 800; font-size: 14px; font-family: Consolas, monospace; color: #F8FAFC;" if self._is_dark else "font-weight: 800; font-size: 14px; font-family: Consolas, monospace; color: #0F172A;")
             return l
 
         def rlbl(txt):
             l = QLabel(txt)
-            l.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 13px;")
+            l.setStyleSheet("font-weight: 700; color: #CBD5E1; font-size: 13px;" if self._is_dark else "font-weight: 700; color: #0F172A; font-size: 13px;")
             return l
 
         self._r_rmse   = rl()
@@ -1006,7 +1050,7 @@ class CalibrationDialog(QDialog):
         self._log_txt.setMinimumHeight(180)
         log_box.addWidget(self._log_txt)
         btn_clr_log = QPushButton("Log Törlése")
-        btn_clr_log.setStyleSheet(_BTN_SEC)
+        btn_clr_log.setStyleSheet(_BTN_SEC_DARK if self._is_dark else _BTN_SEC)
         btn_clr_log.clicked.connect(self._log_txt.clear)
         log_box.addWidget(btn_clr_log)
         ly.addWidget(log_grp, stretch=1)

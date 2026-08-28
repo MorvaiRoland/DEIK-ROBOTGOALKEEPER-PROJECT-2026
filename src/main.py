@@ -16,8 +16,17 @@ Ez a fájl:
 
 import argparse
 import logging
+import os
 import sys
+import warnings
 from pathlib import Path
+
+# Disable Qt QPA portal DBus registration warnings and third-party deprecation warnings
+os.environ["QT_LOGGING_RULES"] = "qt.qpa.services.warning=false;qt.qpa.*=false"
+os.environ["QT_NO_DESKTOP_PORTAL"] = "1"
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*pynvml.*")
 
 # ── Projekt gyökér hozzáadása a Python elérési úthoz ────────────────────────
 # Ez szükséges, hogy az abszolút importok működjenek
@@ -159,6 +168,107 @@ def setup_logging(config: dict, log_level_override: str = None) -> None:
     logging.info("Naplózás beállítva: szint=%s", level_str)
 
 
+def run_health_check(config: dict) -> list:
+    """
+    Rendszer önellenőrzés indításkor.
+    Visszaad egy listát dict-ekkél: {'icon': str, 'text': str, 'level': str}
+    level: 'ok' | 'warning' | 'error'
+    """
+    import os
+    results = []
+
+    # 1. GPU és CUDA
+    try:
+        # pyrefly: ignore [missing-import]
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_mem  = torch.cuda.get_device_properties(0).total_memory / 1e9
+            results.append({
+                "icon": "✓", "level": "ok",
+                "text": f"GPU: {gpu_name} ({gpu_mem:.1f} GB VRAM) – CUDA {torch.version.cuda}"
+            })
+        else:
+            results.append({
+                "icon": "⚠", "level": "warning",
+                "text": "CUDA nem elérhető – CPU módban fut (lassabb!)"
+            })
+    except ImportError:
+        results.append({
+            "icon": "✗", "level": "error",
+            "text": "PyTorch nincs telepítve – GPU nem használható"
+        })
+
+    # 2. TensorRT / detekálási modell fájl
+    model_path = config.get("detection", {}).get("model_path", "models/rtdetr-l.engine")
+    full_model = str(PROJECT_ROOT / model_path)
+    if os.path.exists(full_model):
+        size_mb = os.path.getsize(full_model) / (1024 * 1024)
+        results.append({
+            "icon": "✓", "level": "ok",
+            "text": f"AI modell: {model_path} ({size_mb:.0f} MB)"
+        })
+    else:
+        results.append({
+            "icon": "✗", "level": "error",
+            "text": f"AI modell nem található: {model_path}"
+        })
+
+    # 3. Kalibraciós fájl
+    cal_path = config.get("stereo", {}).get(
+        "calibration_file", "data/calibration/stereo_calibration.npz"
+    )
+    full_cal = str(PROJECT_ROOT / cal_path)
+    if os.path.exists(full_cal):
+        results.append({
+            "icon": "✓", "level": "ok",
+            "text": f"Kalibració: {cal_path} megtalálva"
+        })
+    else:
+        results.append({
+            "icon": "⚠", "level": "warning",
+            "text": f"Nincs kalibrációs fájl – szükséges a kalibració előtt!"
+        })
+
+    # 4. Szabad RAM
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        avail_gb = mem.available / (1024 ** 3)
+        if avail_gb >= 4.0:
+            results.append({
+                "icon": "✓", "level": "ok",
+                "text": f"RAM: {avail_gb:.1f} GB szabad / {mem.total / (1024**3):.1f} GB összes"
+            })
+        elif avail_gb >= 2.0:
+            results.append({
+                "icon": "⚠", "level": "warning",
+                "text": f"RAM: csak {avail_gb:.1f} GB szabad – ajánlott 4 GB+"
+            })
+        else:
+            results.append({
+                "icon": "✗", "level": "error",
+                "text": f"RAM: kritíkusan alacsony ({avail_gb:.1f} GB szabad)!"
+            })
+    except Exception:
+        pass
+
+    # 5. Kamera típus
+    cam_type = config.get("camera", {}).get("type", "ximea")
+    if cam_type == "ximea":
+        results.append({
+            "icon": "✓", "level": "ok",
+            "text": "Kamera: Ximea CMOS sztereó kámera mód aktiv"
+        })
+    else:
+        results.append({
+            "icon": "⚠", "level": "warning",
+            "text": f"Kamera: {cam_type.upper()} mód (fejlesztési / teszt mód!)"
+        })
+
+    return results
+
+
 def start_gui(config: dict) -> None:
     """
     Elindítja a PyQt6 grafikus felületet.
@@ -187,12 +297,16 @@ def start_gui(config: dict) -> None:
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
 
-    # Betöltő ablak (SplashScreen) indítása a két logóval
+    # Betöltő ablak (SplashScreen)
     splash = SplashScreen()
     splash.show()
     splash.run_loading_sequence()
 
-    # Főablak megnyitása teljes képernyős módban (cím- és tálcasor nélkül)
+    # Health check – önellenőrzés az indítás után
+    checks = run_health_check(config)
+    splash.show_health_check(checks)
+
+    # Főablak megnyitása teljes képernyős módban
     window = MainWindow(config)
     window.showFullScreen()
     splash.close()

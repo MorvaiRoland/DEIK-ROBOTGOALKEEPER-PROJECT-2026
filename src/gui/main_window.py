@@ -55,11 +55,27 @@ from stereo.triangulator import StereoTriangulator
 from prediction.trajectory_predictor import TrajectoryPredictor, ImpactPrediction
 from gui.goal_view import GoalViewWidget
 from gui.calibration_dialog import CalibrationDialog
+from gui.actuator_widget import ActuatorControlWidget
+from gui.analytics_view import AnalyticsDashboardWidget
 from gui.theme import (
-    LIGHT_DEIK_QSS, get_status_pill_style, get_app_icon, COLOR_DEIK_GREEN, COLOR_DEIK_GOLD
+    LIGHT_DEIK_QSS, DARK_DEIK_QSS, get_status_pill_style, get_hw_pill_style, usage_level,
+    get_app_icon, COLOR_DEIK_GREEN, COLOR_DEIK_GOLD
 )
+# pyrefly: ignore [missing-import]
+from PyQt6.QtWidgets import QMenu
+
+try:
+    # pyrefly: ignore [missing-import]
+    import pynvml
+    pynvml.nvmlInit()
+    _nvml_available = True
+    _nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+except Exception:
+    _nvml_available = False
+    _nvml_handle = None
 
 logger = logging.getLogger(__name__)
+
 
 
 # --------------------------------------------------------------------------- #
@@ -1015,10 +1031,13 @@ class MainWindow(QMainWindow):
         self._esc_shortcut = QShortcut(QKeySequence("Esc"), self)
         self._esc_shortcut.activated.connect(self._toggle_fullscreen)
 
-        self.setStyleSheet(LIGHT_DEIK_QSS)
-
         self._setup_log_handler()
+        self._is_dark_theme = getattr(self, "_is_dark_theme", False)
+        self._telemetry_cards = []
+        self._btn_resets = []
         self._build_ui()
+
+        self._apply_theme_to_ui()
 
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._update_system_status)
@@ -1034,90 +1053,107 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
 
     def _build_header_toolbar(self) -> None:
-        """Letisztult Fejléc DEIK Címerrel és Fő Vezérlőkkel."""
+        """Kiemelt Fejléc: Bal oldalon nagy Hamburger Menü, jobb oldalon Indítás gomb."""
         toolbar = QToolBar("DEIK Fejléc")
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        # DEIK Címer Logó
+        # 1. ≡ Nagy Hamburger Menü Gomb (Bal oldal)
+        btn_hamburger = QPushButton("≡   MENÜ")
+        self._btn_hamburger = btn_hamburger
+        btn_hamburger.setFixedHeight(40)
+        btn_hamburger.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_hamburger.setStyleSheet(
+            "QPushButton { background-color: #0F5132; color: #FFFFFF; font-weight: 900; "
+            "font-size: 14px; border-radius: 8px; border: 1px solid #10B981; padding: 0 18px; letter-spacing: 1px; }"
+            "QPushButton:hover { background-color: #146C43; border-color: #34D399; }"
+        )
+
+        menu = QMenu(self)
+        self._main_menu = menu
+        self._apply_menu_stylesheet()
+
+        # Section 1: Nézetek
+        lbl_sec1 = menu.addAction("── NÉZETEK & DASHBOARDOK ──")
+        lbl_sec1.setEnabled(False)
+
+        act_overview  = menu.addAction("Összesített Nézet (Összes modul)")
+        act_cameras   = menu.addAction("Élő Dual Kamerák (HD Stream)")
+        act_goal_sim  = menu.addAction("Kapu / Robot Szimuláció (Dőlő kapus)")
+        act_analytics = menu.addAction("Analitika / Hőtérkép Dashboard")
+        act_actuator  = menu.addAction("Aktuátor Hardver Teszt Panel (E-Stop)")
+
+        menu.addSeparator()
+
+        # Section 2: Eszközök
+        lbl_sec2 = menu.addAction("── ESZKÖZÖK & BEÁLLÍTÁSOK ──")
+        lbl_sec2.setEnabled(False)
+
+        act_calib = menu.addAction("Sztereó Kalibrációs Munkafolyamat")
+        act_theme = menu.addAction("Téma Váltás (Sötét / Világos Mód)")
+
+        menu.addSeparator()
+
+        # Section 3: Információ
+        lbl_sec3 = menu.addAction("── INFORMÁCIÓ ──")
+        lbl_sec3.setEnabled(False)
+
+        act_about = menu.addAction("Névjegy / Fejlesztők (DEIK v1.0)")
+
+        # Eseménykezelők
+        act_overview.triggered.connect(lambda: self._set_central_view(0))
+        act_cameras.triggered.connect(lambda: self._set_central_view(1))
+        act_goal_sim.triggered.connect(lambda: self._set_central_view(2))
+        act_analytics.triggered.connect(lambda: self._set_central_view(3))
+        act_actuator.triggered.connect(lambda: self._set_central_view(4))
+        act_calib.triggered.connect(self._on_open_calibration)
+        act_theme.triggered.connect(self._toggle_theme)
+        act_about.triggered.connect(self._show_about_dialog)
+
+        btn_hamburger.setMenu(menu)
+        toolbar.addWidget(btn_hamburger)
+
+        toolbar.addSeparator()
+
+        # 2. DEIK Logó & Cím (Középső részen)
         deik_logo_path = "assets/deik_logo.png"
         if os.path.exists(deik_logo_path):
             l_lbl1 = QLabel()
-            l_lbl1.setPixmap(QPixmap(deik_logo_path).scaledToHeight(46, Qt.TransformationMode.SmoothTransformation))
+            l_lbl1.setPixmap(QPixmap(deik_logo_path).scaledToHeight(42, Qt.TransformationMode.SmoothTransformation))
             toolbar.addWidget(l_lbl1)
 
-        # RGK System Shield Logó
         rgk_logo_path = "assets/logo.png"
         if os.path.exists(rgk_logo_path):
             l_lbl2 = QLabel()
-            l_lbl2.setPixmap(QPixmap(rgk_logo_path).scaledToHeight(46, Qt.TransformationMode.SmoothTransformation))
+            l_lbl2.setPixmap(QPixmap(rgk_logo_path).scaledToHeight(42, Qt.TransformationMode.SmoothTransformation))
             toolbar.addWidget(l_lbl2)
 
         title_lbl = QLabel("DEIK ROBOT FOCI KAPUS")
-        title_lbl.setStyleSheet("font-weight: 800; font-size: 15px; color: #0F5132;")
+        self._title_lbl = title_lbl
         sub_lbl = QLabel("Debreceni Egyetem Informatikai Kar")
-        sub_lbl.setStyleSheet("font-size: 11px; color: #D97706; font-weight: 600;")
+        self._sub_lbl = sub_lbl
 
         brand_widget = QWidget()
         b_box = QVBoxLayout(brand_widget)
-        b_box.setContentsMargins(4, 0, 10, 0)
+        b_box.setContentsMargins(6, 0, 12, 0)
         b_box.setSpacing(0)
         b_box.addWidget(title_lbl)
         b_box.addWidget(sub_lbl)
         toolbar.addWidget(brand_widget)
 
-        toolbar.addSeparator()
+        # Rugalmas elválasztó térköz a jobb oldalra toláshoz
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
 
-        self._btn_start = QPushButton("INDÍTÁS")
+        # 3. Jobb oldali sáv: Fő Indítás Gomb & Telemetriák
+        self._btn_start = QPushButton("▶  INDÍTÁS")
         self._btn_start.setObjectName("btn_start")
-        self._btn_start.setFixedHeight(36)
+        self._btn_start.setFixedHeight(40)
+        self._btn_start.setMinimumWidth(130)
+        self._btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_start.clicked.connect(self._on_start_stop)
         toolbar.addWidget(self._btn_start)
-
-        toolbar.addSeparator()
-
-        # Nézetváltó Gombok (Összesített, Élő Kamerák, Kapu & Telemetria)
-        self._btn_view_comb = QPushButton("Összesített Nézet")
-        self._btn_view_cams = QPushButton("Élő Kamerák")
-        self._btn_view_goal = QPushButton("Kapu / Telemetria")
-
-        for b in [self._btn_view_comb, self._btn_view_cams, self._btn_view_goal]:
-            b.setCheckable(True)
-            b.setFixedHeight(34)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        self._btn_view_comb.setChecked(True)
-        self._btn_view_comb.clicked.connect(lambda: self._set_central_view(0))
-        self._btn_view_cams.clicked.connect(lambda: self._set_central_view(1))
-        self._btn_view_goal.clicked.connect(lambda: self._set_central_view(2))
-
-        toolbar.addWidget(self._btn_view_comb)
-        toolbar.addWidget(self._btn_view_cams)
-        toolbar.addWidget(self._btn_view_goal)
-
-        toolbar.addSeparator()
-
-        btn_about = QPushButton("Névjegy / Fejlesztők")
-        btn_about.setFixedHeight(34)
-        btn_about.setStyleSheet("font-weight: 700; color: #0F5132;")
-        btn_about.clicked.connect(self._show_about_dialog)
-        toolbar.addWidget(btn_about)
-
-        toolbar.addSeparator()
-
-        btn_calibrate = QPushButton("⚙  Kalibrálás")
-        btn_calibrate.setFixedHeight(34)
-        btn_calibrate.setStyleSheet(
-            "QPushButton { font-weight: 800; color: #FFFFFF; background-color: #D97706; "
-            "border-radius: 6px; font-size: 12px; border: none; padding: 0 10px; }"
-            "QPushButton:hover { background-color: #B45309; }"
-        )
-        btn_calibrate.setToolTip(
-            "Sztereó kalibrációs munkafolyamat megnyitása\n"
-            "(sakktáblás képpár rögzítés + OpenCV sztereó kalibrálás)"
-        )
-        btn_calibrate.clicked.connect(self._on_open_calibration)
-        toolbar.addWidget(btn_calibrate)
 
         toolbar.addSeparator()
 
@@ -1129,32 +1165,40 @@ class MainWindow(QMainWindow):
         self._pill_gpu.setStyleSheet(get_status_pill_style("ok"))
         toolbar.addWidget(self._pill_gpu)
 
+    def _apply_menu_stylesheet(self) -> None:
+        dark = getattr(self, "_is_dark_theme", False)
+        if hasattr(self, "_main_menu"):
+            if dark:
+                self._main_menu.setStyleSheet(
+                    "QMenu { background-color: #0B0F17; color: #F8FAFC; border: 2px solid #26334D; "
+                    "font-size: 13px; font-weight: 600; padding: 10px; border-radius: 10px; }"
+                    "QMenu::item { padding: 10px 24px; border-radius: 6px; margin: 3px 0; }"
+                    "QMenu::item:disabled { color: #10B981; font-weight: 900; font-size: 11px; padding: 8px 16px 4px 16px; background: transparent; }"
+                    "QMenu::item:selected { background-color: #0F5132; color: #FFFFFF; font-weight: 800; }"
+                    "QMenu::separator { height: 1px; background: #26334D; margin: 8px 4px; }"
+                )
+            else:
+                self._main_menu.setStyleSheet(
+                    "QMenu { background-color: #FFFFFF; color: #0F172A; border: 2px solid #CBD5E1; "
+                    "font-size: 13px; font-weight: 600; padding: 10px; border-radius: 10px; }"
+                    "QMenu::item { padding: 10px 24px; border-radius: 6px; margin: 3px 0; }"
+                    "QMenu::item:disabled { color: #0F5132; font-weight: 900; font-size: 11px; padding: 8px 16px 4px 16px; background: transparent; }"
+                    "QMenu::item:selected { background-color: #0F5132; color: #FFFFFF; font-weight: 800; }"
+                    "QMenu::separator { height: 1px; background: #CBD5E1; margin: 8px 4px; }"
+                )
+
     def _set_central_view(self, index: int) -> None:
-        """Vált a 3 beépített központi nézet mód között."""
+        """Vált az 5 beépített központi nézet mód között."""
         self._central_stack.setCurrentIndex(index)
-        self._btn_view_comb.setChecked(index == 0)
-        self._btn_view_cams.setChecked(index == 1)
-        self._btn_view_goal.setChecked(index == 2)
-        self._update_view_btn_styles()
 
     def _update_view_btn_styles(self) -> None:
-        active_s = (
-            "QPushButton { background-color: #0F5132; color: #FFFFFF; font-weight: 800; border-radius: 6px; font-size: 12px; border: 1px solid #0F5132; }"
-        )
-        inactive_s = (
-            "QPushButton { background-color: #F1F5F9; color: #334155; font-weight: 700; border-radius: 6px; font-size: 12px; border: 1px solid #CBD5E1; }"
-            "QPushButton:hover { background-color: #E2E8F0; color: #0F5132; }"
-        )
-
-        self._btn_view_comb.setStyleSheet(active_s if self._btn_view_comb.isChecked() else inactive_s)
-        self._btn_view_cams.setStyleSheet(active_s if self._btn_view_cams.isChecked() else inactive_s)
-        self._btn_view_goal.setStyleSheet(active_s if self._btn_view_goal.isChecked() else inactive_s)
+        """Téma-frissítés segédfüggvény."""
+        self._apply_menu_stylesheet()
 
     def _build_central_widget(self) -> None:
-        """Központi Terület QStackedWidget-tel: 3 Különböző Nézet Mód."""
+        """Központi Terület QStackedWidget-tel: 5 Különböző Nézet Mód."""
         central = QWidget()
         central.setObjectName("centralWidget")
-        central.setStyleSheet("background-color: #F8FAFC;")
         self.setCentralWidget(central)
 
         main_layout = QVBoxLayout(central)
@@ -1167,7 +1211,6 @@ class MainWindow(QMainWindow):
         # PAGE 0: ÖSSZESÍTETT NÉZET (Combined View)
         # -------------------------------------------------------------
         page_comb = QWidget()
-        page_comb.setStyleSheet("background-color: #F8FAFC;")
         comb_layout = QVBoxLayout(page_comb)
         comb_layout.setSpacing(10)
         comb_layout.setContentsMargins(4, 4, 4, 4)
@@ -1175,23 +1218,23 @@ class MainWindow(QMainWindow):
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
 
-        left_grp = QGroupBox("Bal Kamera  [X = -1100 mm]")
+        left_grp = QGroupBox("Bal Kamera  [X = -1150 mm]")
+        self._left_grp = left_grp
         l_box = QVBoxLayout(left_grp)
         l_box.setContentsMargins(6, 18, 6, 6)
         self._cam_label_left = ZoomableLabel()
         self._cam_label_left.setText("Kamera inaktív")
-        self._cam_label_left.setStyleSheet("background-color: #F1F5F9; color: #475569; border: 1px solid #CBD5E1; border-radius: 6px;")
         self._cam_label_left.setMinimumSize(320, 220)
         self._cam_label_left.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         l_box.addWidget(self._cam_label_left)
         top_row.addWidget(left_grp, stretch=3)
 
-        right_grp = QGroupBox("Jobb Kamera  [X = +1100 mm]")
+        right_grp = QGroupBox("Jobb Kamera  [X = +1150 mm]")
+        self._right_grp = right_grp
         r_box = QVBoxLayout(right_grp)
         r_box.setContentsMargins(6, 18, 6, 6)
         self._cam_label_right = ZoomableLabel()
         self._cam_label_right.setText("Kamera inaktív")
-        self._cam_label_right.setStyleSheet("background-color: #F1F5F9; color: #475569; border: 1px solid #CBD5E1; border-radius: 6px;")
         self._cam_label_right.setMinimumSize(320, 220)
         self._cam_label_right.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         r_box.addWidget(self._cam_label_right)
@@ -1206,12 +1249,9 @@ class MainWindow(QMainWindow):
         g_box.addWidget(self._goal_view)
 
         btn_clear = QPushButton("Lövéstörténet Törlése")
+        self._btn_clear = btn_clear
         btn_clear.setFixedHeight(30)
         btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_clear.setStyleSheet(
-            "QPushButton { background-color: #F1F5F9; color: #334155; font-weight: 700; border-radius: 6px; font-size: 11px; border: 1px solid #CBD5E1; }"
-            "QPushButton:hover { background-color: #FEE2E2; color: #DC2626; border-color: #EF4444; }"
-        )
         btn_clear.clicked.connect(self._on_clear_history)
         g_box.addWidget(btn_clear)
 
@@ -1228,17 +1268,15 @@ class MainWindow(QMainWindow):
 
         def make_card(title: str, color: str = "#0F5132") -> tuple[QLabel, QWidget]:
             w = QWidget()
-            w.setStyleSheet("background-color: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 6px; padding: 6px;")
             v = QVBoxLayout(w)
             v.setContentsMargins(6, 4, 6, 4)
             v.setSpacing(2)
             t_lbl = QLabel(title)
-            t_lbl.setStyleSheet("font-size: 10px; color: #475569; font-weight: bold;")
             val_lbl = QLabel("—")
             val_lbl.setFont(font_val)
-            val_lbl.setStyleSheet(f"color: {color};")
             v.addWidget(t_lbl)
             v.addWidget(val_lbl)
+            self._telemetry_cards.append((w, t_lbl, val_lbl, color))
             return val_lbl, w
 
         self._lbl_x, card_x = make_card("LABDA X (MM)")
@@ -1259,27 +1297,26 @@ class MainWindow(QMainWindow):
         # PAGE 1: ÉLŐ KAMERÁK NÉZET (Live Stereo Cameras View)
         # -------------------------------------------------------------
         page_cams = QWidget()
-        page_cams.setStyleSheet("background-color: #F8FAFC;")
         cams_layout = QHBoxLayout(page_cams)
         cams_layout.setSpacing(12)
         cams_layout.setContentsMargins(4, 4, 4, 4)
 
-        left_grp_full = QGroupBox("Bal Kamera — Nagyfelbontású Élő Videófolyam  [X = -1100 mm]")
+        left_grp_full = QGroupBox("Bal Kamera — Nagyfelbontású Élő Videófolyam  [X = -1150 mm]")
+        self._left_grp_full = left_grp_full
         lf_box = QVBoxLayout(left_grp_full)
         lf_box.setContentsMargins(8, 20, 8, 8)
         self._cam_label_left_full = ZoomableLabel()
         self._cam_label_left_full.setText("Kamera inaktív")
-        self._cam_label_left_full.setStyleSheet("background-color: #F1F5F9; color: #475569; border: 1px solid #CBD5E1; border-radius: 8px;")
         self._cam_label_left_full.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         lf_box.addWidget(self._cam_label_left_full)
         cams_layout.addWidget(left_grp_full, stretch=1)
 
-        right_grp_full = QGroupBox("Jobb Kamera — Nagyfelbontású Élő Videófolyam  [X = +1100 mm]")
+        right_grp_full = QGroupBox("Jobb Kamera — Nagyfelbontású Élő Videófolyam  [X = +1150 mm]")
+        self._right_grp_full = right_grp_full
         rf_box = QVBoxLayout(right_grp_full)
         rf_box.setContentsMargins(8, 20, 8, 8)
         self._cam_label_right_full = ZoomableLabel()
         self._cam_label_right_full.setText("Kamera inaktív")
-        self._cam_label_right_full.setStyleSheet("background-color: #F1F5F9; color: #475569; border: 1px solid #CBD5E1; border-radius: 8px;")
         self._cam_label_right_full.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         rf_box.addWidget(self._cam_label_right_full)
         cams_layout.addWidget(right_grp_full, stretch=1)
@@ -1287,15 +1324,14 @@ class MainWindow(QMainWindow):
         self._central_stack.addWidget(page_cams)
 
         # -------------------------------------------------------------
-        # PAGE 2: KAPU & TELEMETRIA NÉZET (Goal & 3D Telemetry Dashboard View)
+        # PAGE 2: KAPU & SZIMULÁCIÓ NÉZET (Goal & Robot Simulation View)
         # -------------------------------------------------------------
         page_goal = QWidget()
-        page_goal.setStyleSheet("background-color: #F8FAFC;")
         goal_layout = QVBoxLayout(page_goal)
         goal_layout.setSpacing(10)
         goal_layout.setContentsMargins(4, 4, 4, 4)
 
-        goal_grp_full = QGroupBox("Nagyfelbontású Kapu Vizualizáció / Becsapódás Előrejelzés")
+        goal_grp_full = QGroupBox("Nagyfelbontású Kapu Vizualizáció / Robot Kapus Szimuláció")
         gf_box = QVBoxLayout(goal_grp_full)
         gf_box.setContentsMargins(8, 20, 8, 8)
         gf_box.setSpacing(8)
@@ -1304,18 +1340,29 @@ class MainWindow(QMainWindow):
         gf_box.addWidget(self._goal_view_full)
 
         btn_clear_full = QPushButton("Lövéstörténet Törlése")
+        self._btn_clear_full = btn_clear_full
         btn_clear_full.setFixedHeight(34)
         btn_clear_full.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_clear_full.setStyleSheet(
-            "QPushButton { background-color: #F1F5F9; color: #334155; font-weight: 700; border-radius: 6px; font-size: 12px; border: 1px solid #CBD5E1; }"
-            "QPushButton:hover { background-color: #FEE2E2; color: #DC2626; border-color: #EF4444; }"
-        )
         btn_clear_full.clicked.connect(self._on_clear_history)
         gf_box.addWidget(btn_clear_full)
 
         goal_layout.addWidget(goal_grp_full, stretch=4)
-
         self._central_stack.addWidget(page_goal)
+
+        # -------------------------------------------------------------
+        # PAGE 3: 📊 ANALITIKA & HŐTÉRKÉP DASHBOARD
+        # -------------------------------------------------------------
+        self._analytics_view = AnalyticsDashboardWidget(self._config)
+        self._central_stack.addWidget(self._analytics_view)
+
+        # -------------------------------------------------------------
+        # PAGE 4: ⚙️ AKTUÁTOR HARDVER TESZT PANEL
+        # -------------------------------------------------------------
+        self._actuator_view = ActuatorControlWidget(self._config)
+        self._actuator_view.position_changed.connect(self._on_actuator_manual_pos)
+        self._central_stack.addWidget(self._actuator_view)
+
+        main_layout.addWidget(self._central_stack)
 
         main_layout.addWidget(self._central_stack)
 
@@ -1327,7 +1374,6 @@ class MainWindow(QMainWindow):
         self._cam_widgets = {}
 
         dock_widget = QWidget()
-        dock_widget.setStyleSheet("background-color: #F8FAFC;")
         dock_layout = QVBoxLayout(dock_widget)
         dock_layout.setContentsMargins(6, 6, 6, 6)
         dock_layout.setSpacing(8)
@@ -1346,6 +1392,9 @@ class MainWindow(QMainWindow):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
 
         btn_left.setChecked(True)
+        self._btn_dock_left = btn_left
+        self._btn_dock_right = btn_right
+        self._btn_dock_sys = btn_sys
 
         nav_box.addWidget(btn_left, stretch=1)
         nav_box.addWidget(btn_right, stretch=1)
@@ -1365,9 +1414,28 @@ class MainWindow(QMainWindow):
             btn_left.setChecked(index == 0)
             btn_right.setChecked(index == 1)
             btn_sys.setChecked(index == 2)
-            update_nav_styles()
+            self._update_dock_nav_styles()
 
-        def update_nav_styles():
+        btn_left.clicked.connect(lambda: set_page(0))
+        btn_right.clicked.connect(lambda: set_page(1))
+        btn_sys.clicked.connect(lambda: set_page(2))
+
+        self._update_dock_nav_styles()
+
+        dock.setWidget(dock_widget)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+
+    def _update_dock_nav_styles(self) -> None:
+        dark = getattr(self, "_is_dark_theme", False)
+        if dark:
+            active_style = (
+                "QPushButton { background-color: #0F5132; color: #FFFFFF; font-weight: 800; border-radius: 6px; font-size: 11px; border: 1px solid #10B981; }"
+            )
+            inactive_style = (
+                "QPushButton { background-color: #151D2A; color: #94A3B8; font-weight: 700; border-radius: 6px; font-size: 11px; border: 1px solid #26334D; }"
+                "QPushButton:hover { background-color: #1E293B; color: #10B981; border-color: #10B981; }"
+            )
+        else:
             active_style = (
                 "QPushButton { background-color: #0F5132; color: #FFFFFF; font-weight: 800; border-radius: 6px; font-size: 11px; border: 1px solid #0F5132; }"
             )
@@ -1376,18 +1444,10 @@ class MainWindow(QMainWindow):
                 "QPushButton:hover { background-color: #E2E8F0; color: #0F5132; border-color: #0F5132; }"
             )
 
-            btn_left.setStyleSheet(active_style if btn_left.isChecked() else inactive_style)
-            btn_right.setStyleSheet(active_style if btn_right.isChecked() else inactive_style)
-            btn_sys.setStyleSheet(active_style if btn_sys.isChecked() else inactive_style)
-
-        btn_left.clicked.connect(lambda: set_page(0))
-        btn_right.clicked.connect(lambda: set_page(1))
-        btn_sys.clicked.connect(lambda: set_page(2))
-
-        update_nav_styles()
-
-        dock.setWidget(dock_widget)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        if hasattr(self, "_btn_dock_left"):
+            self._btn_dock_left.setStyleSheet(active_style if self._btn_dock_left.isChecked() else inactive_style)
+            self._btn_dock_right.setStyleSheet(active_style if self._btn_dock_right.isChecked() else inactive_style)
+            self._btn_dock_sys.setStyleSheet(active_style if self._btn_dock_sys.isChecked() else inactive_style)
 
     def _create_camera_tab(self, is_left: bool) -> QWidget:
         side = "left" if is_left else "right"
@@ -1397,7 +1457,6 @@ class MainWindow(QMainWindow):
         def_cfg = self._config["camera"]
 
         tab_widget = QWidget()
-        tab_widget.setStyleSheet("background-color: #F8FAFC;")
         main_vbox = QVBoxLayout(tab_widget)
         main_vbox.setSpacing(8)
         main_vbox.setContentsMargins(6, 6, 6, 6)
@@ -1561,10 +1620,7 @@ class MainWindow(QMainWindow):
 
         btn_reset = QPushButton("Alapértelmezett")
         btn_reset.setFixedHeight(34)
-        btn_reset.setStyleSheet(
-            "QPushButton { background-color: #F1F5F9; color: #334155; font-weight: 700; border-radius: 6px; font-size: 12px; border: 1px solid #CBD5E1; }"
-            "QPushButton:hover { background-color: #E2E8F0; color: #0F5132; }"
-        )
+        self._btn_resets.append(btn_reset)
         btn_reset.clicked.connect(self._reset_gui_settings)
 
         h_btns.addWidget(btn_save, stretch=1)
@@ -1644,7 +1700,6 @@ class MainWindow(QMainWindow):
     def _create_system_info_tab(self) -> QWidget:
         """Létrehozza a Rendszer Adatok & Diagnosztika lapfület."""
         tab = QWidget()
-        tab.setStyleSheet("background-color: #F8FAFC;")
         layout = QVBoxLayout(tab)
         layout.setSpacing(10)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -1661,7 +1716,6 @@ class MainWindow(QMainWindow):
         self._lbl_diag_fps_pair = QLabel("— FPS")
         self._lbl_diag_fps_det = QLabel("— FPS")
         self._lbl_diag_calib = QLabel("OK (Stereo Calibrated)")
-        self._lbl_diag_calib.setStyleSheet("color: #0F5132; font-weight: bold;")
 
         cam_form.addRow("Bal Kamera FPS:", self._lbl_diag_fps_l)
         cam_form.addRow("Bal Hőmérséklet:", self._lbl_diag_temp_l)
@@ -1679,7 +1733,6 @@ class MainWindow(QMainWindow):
         hw_form.setSpacing(6)
 
         self._lbl_diag_gpu = QLabel("NVIDIA RTX 3050 (6.1 GB VRAM)")
-        self._lbl_diag_gpu.setStyleSheet("font-weight: bold; color: #0F5132;")
         self._lbl_diag_cpu = QLabel("— %")
         self._lbl_diag_ram = QLabel("— MB / — %")
 
@@ -1722,17 +1775,39 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("DEIK Robot Kapus készenlétben. Kattints az INDÍTÁS gombra!")
 
+        dark = getattr(self, "_is_dark_theme", False)
+
+        self._pill_cpu = QLabel(" CPU: --% ")
+        self._pill_cpu.setStyleSheet(get_hw_pill_style("low", dark))
+
+        self._pill_ram = QLabel(" RAM: --% ")
+        self._pill_ram.setStyleSheet(get_hw_pill_style("low", dark))
+
+        self._pill_gpu_usage = QLabel(" GPU: --% ")
+        self._pill_gpu_usage.setStyleSheet(get_hw_pill_style("low", dark))
+
+        self._pill_gpu_temp = QLabel(" --°C ")
+        self._pill_gpu_temp.setStyleSheet(get_hw_pill_style("low", dark))
+
+        self._status_bar.addPermanentWidget(self._pill_cpu)
+        self._status_bar.addPermanentWidget(self._pill_ram)
+        self._status_bar.addPermanentWidget(self._pill_gpu_usage)
+        self._status_bar.addPermanentWidget(self._pill_gpu_temp)
+
         creators_lbl = QLabel(" Készítők: Morvai Roland & Rácz Donát (BSc Mérnökinformatikus) | DEIK v1.0 ")
-        creators_lbl.setStyleSheet("color: #0F5132; font-weight: 700; font-size: 11px; padding-right: 8px;")
+        self._creators_lbl = creators_lbl
         self._status_bar.addPermanentWidget(creators_lbl)
 
     @pyqtSlot()
     def _show_about_dialog(self) -> None:
-        """Megnyitja az egységes fehér témájú Névjegy & Készítők ablakot."""
+        """Megnyitja a témahű Névjegy & Készítők ablakot."""
+        dark = getattr(self, "_is_dark_theme", False)
         dlg = QDialog(self)
         dlg.setWindowTitle("Névjegy & Fejlesztési Információk")
         dlg.setMinimumWidth(480)
         dlg.setStyleSheet(
+            "QDialog, QWidget { background-color: #0B0F17; color: #F8FAFC; font-family: 'Segoe UI', sans-serif; }"
+            if dark else
             "QDialog, QWidget { background-color: #FFFFFF; color: #0F172A; font-family: 'Segoe UI', sans-serif; }"
         )
 
@@ -1761,61 +1836,63 @@ class MainWindow(QMainWindow):
 
         # Cím Fejléc
         title = QLabel("DEIK ROBOT FOCI KAPUS")
-        title.setStyleSheet("font-weight: 800; font-size: 19px; color: #0F5132;")
+        title.setStyleSheet("font-weight: 800; font-size: 19px; color: #4ADE80;" if dark else "font-weight: 800; font-size: 19px; color: #0F5132;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vbox.addWidget(title)
 
         sub = QLabel("Debreceni Egyetem Informatikai Kar")
-        sub.setStyleSheet("font-size: 12px; color: #D97706; font-weight: 700;")
+        sub.setStyleSheet("font-size: 12px; color: #F59E0B; font-weight: 700;" if dark else "font-size: 12px; color: #D97706; font-weight: 700;")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vbox.addWidget(sub)
 
         ver = QLabel("Verzió 1.0.0 (2026)")
-        ver.setStyleSheet("background-color: #F1F5F9; color: #475569; font-weight: 600; font-size: 11px; border-radius: 8px; padding: 2px 10px;")
+        ver.setStyleSheet("background-color: #1E293B; color: #94A3B8; font-weight: 600; font-size: 11px; border-radius: 8px; padding: 2px 10px;" if dark else "background-color: #F1F5F9; color: #475569; font-weight: 600; font-size: 11px; border-radius: 8px; padding: 2px 10px;")
         ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vbox.addWidget(ver)
 
         # Egyetlen Kártya Konténer
         card = QWidget()
         card.setStyleSheet(
+            "background-color: #151D2A; border: 1px solid #26334D; border-radius: 8px; padding: 14px;"
+            if dark else
             "background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 14px;"
         )
         card_vbox = QVBoxLayout(card)
         card_vbox.setSpacing(8)
 
         lbl_dev = QLabel("FEJLESZTŐK / KÉSZÍTŐK")
-        lbl_dev.setStyleSheet("font-weight: 800; font-size: 11px; color: #0F5132; letter-spacing: 0.5px;")
+        lbl_dev.setStyleSheet("font-weight: 800; font-size: 11px; color: #4ADE80; letter-spacing: 0.5px;" if dark else "font-weight: 800; font-size: 11px; color: #0F5132; letter-spacing: 0.5px;")
         card_vbox.addWidget(lbl_dev)
 
         m1 = QLabel("• Morvai Roland – BSc Mérnökinformatikus (DEIK)")
-        m1.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 13px;")
+        m1.setStyleSheet("font-weight: 700; color: #F8FAFC; font-size: 13px;" if dark else "font-weight: 700; color: #0F172A; font-size: 13px;")
         card_vbox.addWidget(m1)
 
         m2 = QLabel("• Rácz Donát – BSc Mérnökinformatikus (DEIK)")
-        m2.setStyleSheet("font-weight: 700; color: #0F172A; font-size: 13px;")
+        m2.setStyleSheet("font-weight: 700; color: #F8FAFC; font-size: 13px;" if dark else "font-weight: 700; color: #0F172A; font-size: 13px;")
         card_vbox.addWidget(m2)
 
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("color: #E2E8F0;")
+        line.setStyleSheet("color: #26334D;" if dark else "color: #E2E8F0;")
         card_vbox.addWidget(line)
 
         lbl_info = QLabel("PROJEKT & TECHNOLÓGIA")
-        lbl_info.setStyleSheet("font-weight: 800; font-size: 11px; color: #0F5132; letter-spacing: 0.5px;")
+        lbl_info.setStyleSheet("font-weight: 800; font-size: 11px; color: #4ADE80; letter-spacing: 0.5px;" if dark else "font-weight: 800; font-size: 11px; color: #0F5132; letter-spacing: 0.5px;")
         card_vbox.addWidget(lbl_info)
 
         details = QLabel(
             "• <b>Projekt:</b> Valós idejű sztereó látórendszer és trajektória előrejelzés robot kapushoz.<br>"
             "• <b>Szoftver stack:</b> Python 3.12, PyQt6, OpenCV, PyTorch, YOLOv10 (CUDA GPU Acceleration)"
         )
-        details.setStyleSheet("color: #334155; font-size: 12px;")
+        details.setStyleSheet("color: #CBD5E1; font-size: 12px;" if dark else "color: #334155; font-size: 12px;")
         card_vbox.addWidget(details)
 
         vbox.addWidget(card)
 
         # Rendben Gomb
         btn_ok = QPushButton("Rendben")
-        btn_ok.setFixedHeight(36)
+        btn_ok.setFixedSize(120, 36)
         btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_ok.setStyleSheet(
             "QPushButton { background-color: #0F5132; color: #FFFFFF; font-weight: bold; border-radius: 6px; font-size: 13px; border: none; }"
@@ -1852,7 +1929,7 @@ class MainWindow(QMainWindow):
         # Szinkronizáljuk a főoldali GUI-ban beállított kamera paramétereket a konfigba
         self._sync_config_from_ui()
 
-        dlg = CalibrationDialog(self._config, parent=self)
+        dlg = CalibrationDialog(self._config, is_dark=getattr(self, "_is_dark_theme", False), parent=self)
         dlg.exec()
         logger.info("Kalibrációs dialog bezárva.")
 
@@ -1879,6 +1956,27 @@ class MainWindow(QMainWindow):
             self._goal_view_full.clear_history()
         logger.info("Lövés történet törölve.")
 
+    def _apply_camera_overlay_info(self, frame: np.ndarray, side: str, fps: float) -> np.ndarray:
+        """Kirajzolja az FPS és kamera info overlay-t közvetlenül a képkockára."""
+        if frame is None or frame.size == 0:
+            return frame
+        out = frame.copy()
+        cam_cfg = self._config.get("camera", {}).get(side, {})
+        exp = cam_cfg.get("exposure_time_us", 3000)
+
+        side_text = "BAL" if side == "left" else "JOBB"
+        label_text = f"{side_text}: {fps:.1f} FPS  |  {exp} us"
+
+        cv2.rectangle(out, (10, 10), (270, 42), (15, 23, 42), -1)
+        cv2.rectangle(out, (10, 10), (270, 42), (15, 81, 50), 1)
+
+        cv2.circle(out, (24, 26), 5, (74, 222, 128), -1)
+        cv2.putText(
+            out, label_text, (38, 30),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA
+        )
+        return out
+
     @pyqtSlot(np.ndarray, np.ndarray, dict)
     def _on_frames_ready(
         self,
@@ -1890,13 +1988,29 @@ class MainWindow(QMainWindow):
         left_roi_zoom = self._get_roi_zoom_frame(frame_left, "left")
         right_roi_zoom = self._get_roi_zoom_frame(frame_right, "right")
 
-        self._display_frame(left_roi_zoom, self._cam_label_left)
-        self._display_frame(right_roi_zoom, self._cam_label_right)
+        # FPS overlay rárajzolása
+        cam_fps_l = stats.get("cam_fps_left", 0.0)
+        cam_fps_r = stats.get("cam_fps_right", 0.0)
+        left_overlay = self._apply_camera_overlay_info(left_roi_zoom, "left", cam_fps_l)
+        right_overlay = self._apply_camera_overlay_info(right_roi_zoom, "right", cam_fps_r)
+
+        self._display_frame(left_overlay, self._cam_label_left)
+        self._display_frame(right_overlay, self._cam_label_right)
 
         if hasattr(self, "_cam_label_left_full") and self._cam_label_left_full:
-            self._display_frame(left_roi_zoom, self._cam_label_left_full)
+            self._display_frame(left_overlay, self._cam_label_left_full)
         if hasattr(self, "_cam_label_right_full") and self._cam_label_right_full:
-            self._display_frame(right_roi_zoom, self._cam_label_right_full)
+            self._display_frame(right_overlay, self._cam_label_right_full)
+
+        # Dinamikus kamera fejléc frissítés
+        if hasattr(self, "_left_grp") and self._left_grp:
+            self._left_grp.setTitle(f"Bal Kamera  ●  {cam_fps_l:.0f} FPS  [X = -1150 mm]")
+        if hasattr(self, "_right_grp") and self._right_grp:
+            self._right_grp.setTitle(f"Jobb Kamera  ●  {cam_fps_r:.0f} FPS  [X = +1150 mm]")
+        if hasattr(self, "_left_grp_full") and self._left_grp_full:
+            self._left_grp_full.setTitle(f"Bal Kamera — Nagyfelbontású Élő Videófolyam  ●  {cam_fps_l:.0f} FPS")
+        if hasattr(self, "_right_grp_full") and self._right_grp_full:
+            self._right_grp_full.setTitle(f"Jobb Kamera — Nagyfelbontású Élő Videófolyam  ●  {cam_fps_r:.0f} FPS")
 
         if stats["pos_valid"]:
             self._lbl_x.setText(f"{stats['x_3d']:+.1f}")
@@ -1932,6 +2046,15 @@ class MainWindow(QMainWindow):
                     confidence=impact.confidence,
                     time_to_impact_s=impact.time_to_impact_s,
                     in_goal=impact.in_goal,
+                )
+            if hasattr(self, "_analytics_view") and self._analytics_view:
+                speed_kmh = (stats.get("speed_m_s", 12.5) or 12.5) * 3.6
+                self._analytics_view.add_shot_event(
+                    x_mm=impact.x_mm,
+                    y_mm=impact.y_mm,
+                    conf=impact.confidence,
+                    in_goal=impact.in_goal,
+                    speed_kmh=speed_kmh
                 )
         else:
             self._lbl_impact.setText("—")
@@ -1987,6 +2110,16 @@ class MainWindow(QMainWindow):
         self._pill_sys.setStyleSheet(get_status_pill_style("info"))
         self._status_bar.showMessage("Rendszer leállítva.")
 
+        # Visszaállítjuk az alapértelmezett GroupBox címeket
+        if hasattr(self, "_left_grp") and self._left_grp:
+            self._left_grp.setTitle("Bal Kamera  [X = -1150 mm]")
+        if hasattr(self, "_right_grp") and self._right_grp:
+            self._right_grp.setTitle("Jobb Kamera  [X = +1150 mm]")
+        if hasattr(self, "_left_grp_full") and self._left_grp_full:
+            self._left_grp_full.setTitle("Bal Kamera — Nagyfelbontású Élő Videófolyam  [X = -1150 mm]")
+        if hasattr(self, "_right_grp_full") and self._right_grp_full:
+            self._right_grp_full.setTitle("Jobb Kamera — Nagyfelbontású Élő Videófolyam  [X = +1150 mm]")
+
     @pyqtSlot(str)
     def _on_log_message(self, msg: str) -> None:
         self._log_panel.appendPlainText(msg)
@@ -1994,20 +2127,161 @@ class MainWindow(QMainWindow):
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self._log_panel.setTextCursor(cursor)
 
+    def _toggle_theme(self) -> None:
+        """Vált a világos (DEIK Fehér) és sötét (Dark Mode) téma között."""
+        self._is_dark_theme = not getattr(self, "_is_dark_theme", False)
+        self._apply_theme_to_ui()
+
+    def _apply_theme_to_ui(self) -> None:
+        """Alkalmazza az aktuális (sötét vagy világos) témát az összes felületi elemre."""
+        dark = getattr(self, "_is_dark_theme", False)
+
+        # 1. QSS Alkalmazás a főablakra
+        self.setStyleSheet(DARK_DEIK_QSS if dark else LIGHT_DEIK_QSS)
+
+        # 2. Fejléc elemek
+        if hasattr(self, "_title_lbl"):
+            self._title_lbl.setStyleSheet("font-weight: 800; font-size: 15px; color: #4ADE80;" if dark else "font-weight: 800; font-size: 15px; color: #0F5132;")
+        if hasattr(self, "_sub_lbl"):
+            self._sub_lbl.setStyleSheet("font-size: 11px; color: #F59E0B; font-weight: 600;" if dark else "font-size: 11px; color: #D97706; font-weight: 600;")
+        if hasattr(self, "_btn_about"):
+            self._btn_about.setStyleSheet("font-weight: 700; color: #4ADE80;" if dark else "font-weight: 700; color: #0F5132;")
+
+        # Theme toggle button text and style
+        if hasattr(self, "_btn_theme_toggle"):
+            if dark:
+                self._btn_theme_toggle.setText("☀️ Világos Mód")
+                self._btn_theme_toggle.setStyleSheet(
+                    "QPushButton { font-weight: 800; color: #F8FAFC; background-color: #151D2A; "
+                    "border-radius: 6px; font-size: 12px; border: 1px solid #26334D; padding: 0 10px; }"
+                    "QPushButton:hover { background-color: #1E293B; border-color: #10B981; color: #10B981; }"
+                )
+            else:
+                self._btn_theme_toggle.setText("🌙 Sötét Mód")
+                self._btn_theme_toggle.setStyleSheet(
+                    "QPushButton { font-weight: 800; color: #334155; background-color: #F1F5F9; "
+                    "border-radius: 6px; font-size: 12px; border: 1px solid #CBD5E1; padding: 0 10px; }"
+                    "QPushButton:hover { background-color: #E2E8F0; border-color: #0F5132; color: #0F5132; }"
+                )
+
+        # 3. Nézetváltó és Dock Navigációs gombok
+        self._update_view_btn_styles()
+        self._update_dock_nav_styles()
+
+        # 4. Telemetriai kártyák
+        for w, t_lbl, val_lbl, default_color in getattr(self, "_telemetry_cards", []):
+            if dark:
+                w.setStyleSheet("background-color: #151D2A; border: 1px solid #26334D; border-radius: 6px; padding: 6px;")
+                t_lbl.setStyleSheet("font-size: 10px; color: #94A3B8; font-weight: bold; background: transparent;")
+            else:
+                w.setStyleSheet("background-color: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 6px; padding: 6px;")
+                t_lbl.setStyleSheet("font-size: 10px; color: #475569; font-weight: bold; background: transparent;")
+
+        # 6. GoalView, Analytics and Actuator widgets theme propagation
+        if hasattr(self, "_goal_view") and self._goal_view:
+            self._goal_view.set_dark(dark)
+        if hasattr(self, "_goal_view_full") and self._goal_view_full:
+            self._goal_view_full.set_dark(dark)
+        if hasattr(self, "_analytics_view") and self._analytics_view:
+            self._analytics_view.set_dark(dark)
+        if hasattr(self, "_actuator_view") and self._actuator_view:
+            self._actuator_view.set_dark(dark)
+
+        # 7. Kamera Placeholderek
+        cam_ph_style = (
+            "background-color: #151D2A; color: #94A3B8; border: 1px solid #26334D; border-radius: 6px;"
+            if dark else
+            "background-color: #F1F5F9; color: #475569; border: 1px solid #CBD5E1; border-radius: 6px;"
+        )
+        for attr in ["_cam_label_left", "_cam_label_right", "_cam_label_left_full", "_cam_label_right_full"]:
+            lbl = getattr(self, attr, None)
+            if lbl:
+                lbl.setStyleSheet(cam_ph_style)
+
+        # 8. Törlés és Alapértelmezett Gombok
+        btn_clear_style = (
+            "QPushButton { background-color: #151D2A; color: #94A3B8; font-weight: 700; border-radius: 6px; font-size: 11px; border: 1px solid #26334D; }"
+            "QPushButton:hover { background-color: #450A0A; color: #FCA5A5; border-color: #EF4444; }"
+            if dark else
+            "QPushButton { background-color: #F1F5F9; color: #334155; font-weight: 700; border-radius: 6px; font-size: 11px; border: 1px solid #CBD5E1; }"
+            "QPushButton:hover { background-color: #FEE2E2; color: #DC2626; border-color: #EF4444; }"
+        )
+        if hasattr(self, "_btn_clear") and self._btn_clear:
+            self._btn_clear.setStyleSheet(btn_clear_style)
+        if hasattr(self, "_btn_clear_full") and self._btn_clear_full:
+            self._btn_clear_full.setStyleSheet(btn_clear_style)
+
+        btn_reset_style = (
+            "QPushButton { background-color: #151D2A; color: #94A3B8; font-weight: 700; border-radius: 6px; font-size: 12px; border: 1px solid #26334D; }"
+            "QPushButton:hover { background-color: #1E293B; color: #4ADE80; border-color: #4ADE80; }"
+            if dark else
+            "QPushButton { background-color: #F1F5F9; color: #334155; font-weight: 700; border-radius: 6px; font-size: 12px; border: 1px solid #CBD5E1; }"
+            "QPushButton:hover { background-color: #E2E8F0; color: #0F5132; }"
+        )
+        for b in getattr(self, "_btn_resets", []):
+            b.setStyleSheet(btn_reset_style)
+
+        # 9. Kapu vizualizátorok dark állapota
+        if hasattr(self, "_goal_view") and self._goal_view:
+            self._goal_view.set_dark(dark)
+        if hasattr(self, "_goal_view_full") and self._goal_view_full:
+            self._goal_view_full.set_dark(dark)
+
+        # 10. Diagnosztikai címkék
+        if hasattr(self, "_lbl_diag_calib") and self._lbl_diag_calib:
+            self._lbl_diag_calib.setStyleSheet("color: #4ADE80; font-weight: bold;" if dark else "color: #0F5132; font-weight: bold;")
+        if hasattr(self, "_lbl_diag_gpu") and self._lbl_diag_gpu:
+            self._lbl_diag_gpu.setStyleSheet("font-weight: bold; color: #4ADE80;" if dark else "font-weight: bold; color: #0F5132;")
+        if hasattr(self, "_creators_lbl") and self._creators_lbl:
+            self._creators_lbl.setStyleSheet("color: #4ADE80; font-weight: 700; font-size: 11px; padding-right: 8px;" if dark else "color: #0F5132; font-weight: 700; font-size: 11px; padding-right: 8px;")
+
+        # 11. Státusz pill-ek
+        self._update_system_status()
+
+    @pyqtSlot(float, float, float)
+    def _on_actuator_manual_pos(self, x_mm: float, y_mm: float, speed_m_s: float) -> None:
+        if hasattr(self, "_goal_view") and self._goal_view:
+            self._goal_view.set_goalkeeper_target(x_mm, y_mm)
+        if hasattr(self, "_goal_view_full") and self._goal_view_full:
+            self._goal_view_full.set_goalkeeper_target(x_mm, y_mm)
+
     @pyqtSlot()
     def _update_system_status(self) -> None:
-        """Másodpercenként frissíti a hardveres CPU és RAM erőforrás telemetriát."""
-        if hasattr(self, "_lbl_diag_cpu"):
-            try:
-                cpu_p = psutil.cpu_percent()
+        """Másodpercenként frissíti a hardveres CPU, RAM és GPU erőforrás telemetriát."""
+        dark = getattr(self, "_is_dark_theme", False)
+        try:
+            cpu_p = psutil.cpu_percent()
+            if hasattr(self, "_lbl_diag_cpu"):
                 self._lbl_diag_cpu.setText(f"{cpu_p:.1f} %")
+            if hasattr(self, "_pill_cpu"):
+                self._pill_cpu.setText(f" CPU: {cpu_p:.0f}% ")
+                self._pill_cpu.setStyleSheet(get_hw_pill_style(usage_level(cpu_p), dark))
 
-                mem = psutil.virtual_memory()
-                mem_mb = mem.used / (1024 * 1024)
-                mem_tot = mem.total / (1024 * 1024)
+            mem = psutil.virtual_memory()
+            mem_mb = mem.used / (1024 * 1024)
+            mem_tot = mem.total / (1024 * 1024)
+            if hasattr(self, "_lbl_diag_ram"):
                 self._lbl_diag_ram.setText(f"{mem_mb:.0f} MB / {mem_tot:.0f} MB ({mem.percent:.1f} %)")
-            except Exception as e:
-                logger.debug("Hardware stats update error: %s", e)
+            if hasattr(self, "_pill_ram"):
+                self._pill_ram.setText(f" RAM: {mem.percent:.0f}% ")
+                self._pill_ram.setStyleSheet(get_hw_pill_style(usage_level(mem.percent), dark))
+
+            # GPU Telemetria NVML-lel
+            if _nvml_available and _nvml_handle:
+                util = pynvml.nvmlDeviceGetUtilizationRates(_nvml_handle)
+                temp = pynvml.nvmlDeviceGetTemperature(_nvml_handle, pynvml.NVML_TEMPERATURE_GPU)
+                gpu_p = util.gpu
+                if hasattr(self, "_pill_gpu_usage"):
+                    self._pill_gpu_usage.setText(f" GPU: {gpu_p}% ")
+                    self._pill_gpu_usage.setStyleSheet(get_hw_pill_style(usage_level(gpu_p), dark))
+                if hasattr(self, "_pill_gpu_temp"):
+                    self._pill_gpu_temp.setText(f" {temp}°C ")
+                    temp_lvl = "low" if temp < 70 else ("medium" if temp < 85 else "high")
+                    self._pill_gpu_temp.setStyleSheet(get_hw_pill_style(temp_lvl, dark))
+                if hasattr(self, "_lbl_diag_gpu"):
+                    self._lbl_diag_gpu.setText(f"NVIDIA RTX 3050 ({gpu_p}% util · {temp}°C)")
+        except Exception as e:
+            logger.debug("Hardware stats update error: %s", e)
 
     def _sync_config_from_ui(self) -> None:
         """Frissíti a belső self._config szótárt a főoldali GUI vezérlők aktuális értékeivel."""
@@ -2038,6 +2312,8 @@ class MainWindow(QMainWindow):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     gui_cfg = json.load(f)
+                if "theme" in gui_cfg:
+                    self._is_dark_theme = (gui_cfg["theme"] == "dark")
                 for side in ["left", "right"]:
                     if side in gui_cfg:
                         if side not in self._config["camera"]:
@@ -2050,6 +2326,7 @@ class MainWindow(QMainWindow):
     def _save_gui_settings(self) -> None:
         self._sync_config_from_ui()
         gui_cfg = {}
+        gui_cfg["theme"] = "dark" if getattr(self, "_is_dark_theme", False) else "light"
         for side in ["left", "right"]:
             if side in self._config["camera"]:
                 gui_cfg[side] = self._config["camera"][side]

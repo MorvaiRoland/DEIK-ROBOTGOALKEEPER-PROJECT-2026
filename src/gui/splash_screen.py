@@ -156,3 +156,26 @@ class SplashScreen(QWidget):
         for percent, text in steps:
             self.set_progress(percent, text)
             time.sleep(0.35)
+
+    def show_health_check(self, results: list) -> None:
+        """
+        Megjeleníti a rendszer önellenőrzési eredményeit (Health Check) a splash képernyőn.
+        results: List[dict] elemek: {'icon': str, 'text': str, 'level': 'ok'|'warning'|'error'}
+        """
+        self._status_lbl.setText("Rendszer Önellenőrzés (Startup Health Check)...")
+        time.sleep(0.3)
+
+        # Frissítjük a státuszt összefoglalóval
+        ok_cnt = sum(1 for r in results if r.get('level') == 'ok')
+        warn_cnt = sum(1 for r in results if r.get('level') == 'warning')
+        err_cnt = sum(1 for r in results if r.get('level') == 'error')
+
+        summary = f"Önellenőrzés kész: {ok_cnt} rendben"
+        if warn_cnt > 0:
+            summary += f", {warn_cnt} figyelmeztetés"
+        if err_cnt > 0:
+            summary += f", {err_cnt} hiba"
+        self._status_lbl.setText(summary)
+        QApplication.processEvents()
+        time.sleep(1.2)
+
