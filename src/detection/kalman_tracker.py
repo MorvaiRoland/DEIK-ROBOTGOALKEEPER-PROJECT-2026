@@ -20,6 +20,7 @@ Mérési modell:
 """
 
 import logging
+import time
 from typing import Optional, Tuple
 
 import numpy as np
@@ -33,7 +34,7 @@ class KalmanTracker2D:
 
     Állapotvektor: [x, y, vx, vy]
         - x, y:   Középpont koordináták pixelben
-        - vx, vy: Sebesség pixelben/frame
+        - vx, vy: Sebesség pixelben/másodperc
 
     Mérési vektor: [x, y]
         - Csak a pozíciót mérjük (YOLO bounding box közép)
@@ -69,6 +70,7 @@ class KalmanTracker2D:
 
         self._is_initialized = False
         self._coast_frames = 0
+        self._last_timestamp: Optional[float] = None
 
         # Kalman filter mátrixok inicializálása
         self._init_matrices()
@@ -91,15 +93,8 @@ class KalmanTracker2D:
         # Kovariancia mátrix (kezdetben nagy bizonytalanság)
         self._P = np.eye(4, dtype=np.float64) * 1000.0
 
-        # Állapot-átmeneti mátrix (konstans sebesség modell, dt=1 frame)
-        # x_new = x + vx*dt, y_new = y + vy*dt
-        # vx_new = vx, vy_new = vy
-        self._F = np.array([
-            [1, 0, 1, 0],  # x  = x  + vx
-            [0, 1, 0, 1],  # y  = y  + vy
-            [0, 0, 1, 0],  # vx = vx
-            [0, 0, 0, 1],  # vy = vy
-        ], dtype=np.float64)
+        # A tényleges dt minden lépésben a kamera időbélyegéből adódik.
+        self._F = np.eye(4, dtype=np.float64)
 
         # Mérési mátrix: csak x és y mérjük
         # z = H * state = [x, y]
@@ -121,7 +116,7 @@ class KalmanTracker2D:
     # Kalman szűrő lépések
     # ------------------------------------------------------------------
 
-    def init(self, x: float, y: float) -> None:
+    def init(self, x: float, y: float, timestamp: Optional[float] = None) -> None:
         """
         Inicializálja a szűrőt egy mért pozícióval.
 
@@ -136,9 +131,10 @@ class KalmanTracker2D:
         self._P = np.eye(4, dtype=np.float64) * 100.0
         self._is_initialized = True
         self._coast_frames = 0
+        self._last_timestamp = time.perf_counter() if timestamp is None else timestamp
         logger.debug("KalmanTracker2D inicializálva: (%.1f, %.1f)", x, y)
 
-    def update(self, x: float, y: float) -> Tuple[float, float]:
+    def update(self, x: float, y: float, timestamp: Optional[float] = None) -> Tuple[float, float]:
         """
         Frissíti a szűrőt egy új méréssel és visszaadja a simított pozíciót.
 
@@ -152,13 +148,13 @@ class KalmanTracker2D:
             Tuple: (x_simított, y_simított) pixelben
         """
         if not self._is_initialized:
-            self.init(x, y)
+            self.init(x, y, timestamp)
             return x, y
 
         self._coast_frames = 0
 
         # --- Predict lépés ---
-        x_pred, P_pred = self._predict_step()
+        x_pred, P_pred = self._predict_step(self._advance_timestamp(timestamp))
 
         # --- Correct (update) lépés ---
         z = np.array([[x], [y]], dtype=np.float64)
@@ -181,7 +177,7 @@ class KalmanTracker2D:
 
         return float(self._state[0, 0]), float(self._state[1, 0])
 
-    def predict(self) -> Tuple[float, float]:
+    def predict(self, timestamp: Optional[float] = None) -> Tuple[float, float]:
         """
         Elvégzi a predikciós lépést mérés nélkül (kihagyott detektálás esetén).
 
@@ -207,18 +203,40 @@ class KalmanTracker2D:
             return 0.0, 0.0
 
         # Predikciós lépés (correction nélkül)
-        x_pred, self._P = self._predict_step()
+        x_pred, self._P = self._predict_step(self._advance_timestamp(timestamp))
         self._state = x_pred
 
         return float(self._state[0, 0]), float(self._state[1, 0])
 
-    def _predict_step(self) -> Tuple[np.ndarray, np.ndarray]:
+    def project(self, timestamp: float, max_horizon_s: float = 0.15) -> Tuple[float, float]:
+        """Pozíció előrevetítése a GUI frame idejére, állapotmódosítás nélkül."""
+        if not self._is_initialized or self._last_timestamp is None:
+            return 0.0, 0.0
+        dt = max(0.0, min(float(timestamp) - self._last_timestamp, max_horizon_s))
+        return (
+            float(self._state[0, 0] + self._state[2, 0] * dt),
+            float(self._state[1, 0] + self._state[3, 0] * dt),
+        )
+
+    def _advance_timestamp(self, timestamp: Optional[float]) -> float:
+        """Frissíti az időalapot és stabil, másodpercben mért dt-t ad."""
+        now = time.perf_counter() if timestamp is None else float(timestamp)
+        if self._last_timestamp is None:
+            self._last_timestamp = now
+            return 1.0 / 60.0
+        dt = max(0.0, min(now - self._last_timestamp, 0.25))
+        self._last_timestamp = now
+        return dt
+
+    def _predict_step(self, dt: float) -> Tuple[np.ndarray, np.ndarray]:
         """
         Elvégzi a Kalman predikciós lépést.
 
         Returns:
             Tuple: (x_prediktált állapot, P_prediktált kovariancia)
         """
+        self._F[0, 2] = dt
+        self._F[1, 3] = dt
         x_pred = self._F @ self._state
         P_pred = self._F @ self._P @ self._F.T + self._Q
         return x_pred, P_pred
@@ -227,6 +245,7 @@ class KalmanTracker2D:
         """Nullázza a szűrőt (elveszett labda esetén)."""
         self._is_initialized = False
         self._coast_frames = 0
+        self._last_timestamp = None
         self._state = np.zeros((4, 1), dtype=np.float64)
         self._P = np.eye(4, dtype=np.float64) * 1000.0
 
@@ -238,6 +257,13 @@ class KalmanTracker2D:
     def is_initialized(self) -> bool:
         """True ha a szűrő aktív (volt már mérés)."""
         return self._is_initialized
+
+    @property
+    def velocity_pixels_s(self) -> Tuple[float, float]:
+        """A jelenlegi 2D sebesség pixel/másodperc egységben."""
+        if not self._is_initialized:
+            return 0.0, 0.0
+        return float(self._state[2, 0]), float(self._state[3, 0])
 
     @property
     def coast_frames(self) -> int:

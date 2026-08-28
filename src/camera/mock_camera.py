@@ -89,7 +89,7 @@ class MockCamera(BaseCamera):
         self._offset_y = int(config.get("offset_y", 0))
         self._flip_h = bool(config.get("flip_h", False))
         self._flip_v = bool(config.get("flip_v", False))
-        self._rotation = int(config.get("rotation", 0))
+        self._rotation = int(config.get("rotation", 0))  # Landscape mód alapból
         self._exposure_us = int(config.get("exposure_time_us", 3000))
         self._gain_db = float(config.get("gain_db", 0.0))
 

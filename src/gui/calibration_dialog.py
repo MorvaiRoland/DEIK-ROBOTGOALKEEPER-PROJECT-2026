@@ -36,6 +36,13 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QFrame, QSizePolicy, QScrollArea,
 )
 
+from calibration.alignment_helper import (
+    AlignmentInstruction,
+    AlignmentResult,
+    calculate_camera_alignment,
+    draw_alignment_hud,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,7 +118,7 @@ class CalibrationCaptureWorker(QThread):
     mert az egyforma pózok degenárált kalibrálást okoznak!
     """
 
-    frame_ready    = pyqtSignal(np.ndarray, np.ndarray, object, object)
+    frame_ready    = pyqtSignal(np.ndarray, np.ndarray, object, object, object)
     capture_result = pyqtSignal(bool, str)
     error_occurred = pyqtSignal(str)
     stopped        = pyqtSignal()
@@ -196,8 +203,10 @@ class CalibrationCaptureWorker(QThread):
                     time.sleep(0.005)
                     continue
 
-                fl = pair.left.image.copy()
-                fr = pair.right.image.copy()
+                fl_raw = pair.left.image.copy()
+                fr_raw = pair.right.image.copy()
+                fl = fl_raw.copy()
+                fr = fr_raw.copy()
 
                 if self.image_size is None:
                     h, w = fl.shape[:2]
@@ -206,6 +215,10 @@ class CalibrationCaptureWorker(QThread):
                 corners_l = find_chessboard_corners(fl, self._pattern_size)
                 corners_r = find_chessboard_corners(fr, self._pattern_size)
                 both      = corners_l is not None and corners_r is not None
+
+                align_res = calculate_camera_alignment(
+                    corners_l, corners_r, self.image_size, self._pattern_size
+                )
 
                 if corners_l is not None:
                     cv2.drawChessboardCorners(fl, self._pattern_size, corners_l, True)
@@ -238,7 +251,7 @@ class CalibrationCaptureWorker(QThread):
                         logger.warning(msg)
                         self.capture_result.emit(False, msg)
 
-                self.frame_ready.emit(fl, fr, corners_l, corners_r)
+                self.frame_ready.emit(fl, fr, corners_l, corners_r, align_res)
 
         except Exception as exc:
             logger.exception("Capture worker hiba: %s", exc)
@@ -509,8 +522,8 @@ class CalibrationDialog(QDialog):
         root.addWidget(hdr)
 
         sub = QLabel(
-            "Lépések: ① Ellenőrizd a beállításokat  →  "
-            "② Rögzíts képpárokat a sakktáblával  →  ③ Futtasd a kalibrálást és mentsd el."
+            "Lépések: ① Beállítások  →  "
+            "② Pozíció beállítás  →  ③ Képrögzítés  →  ④ Kalibrálás."
         )
         sub.setStyleSheet("color: #475569; font-size: 12px; font-weight: 600;")
         root.addWidget(sub)
@@ -521,9 +534,10 @@ class CalibrationDialog(QDialog):
         root.addWidget(sep)
 
         self._tabs = QTabWidget()
-        self._tabs.addTab(self._build_tab_settings(), "① Beállítások")
-        self._tabs.addTab(self._build_tab_capture(),  "② Képrögzítés")
-        self._tabs.addTab(self._build_tab_run(),      "③ Kalibrálás")
+        self._tabs.addTab(self._build_tab_settings(),  "① Beállítások")
+        self._tabs.addTab(self._build_tab_alignment(), "② Pozíció beállítás")
+        self._tabs.addTab(self._build_tab_capture(),   "③ Képrögzítés")
+        self._tabs.addTab(self._build_tab_run(),       "④ Kalibrálás")
         root.addWidget(self._tabs, stretch=1)
 
         btn_row = QHBoxLayout()
@@ -664,6 +678,144 @@ class CalibrationDialog(QDialog):
 
         ly.addStretch(1)
         return self._wrap_in_scroll(w)
+
+    # --- ② Pozíció beállítás ---
+
+    def _build_tab_alignment(self) -> QWidget:
+        w = QWidget()
+        ly = QVBoxLayout(w)
+        ly.setContentsMargins(12, 12, 12, 12)
+        ly.setSpacing(10)
+
+        # 1. Státusz és pontszám kártya
+        hdr_grp = QGroupBox("Kamera Pozícionálási Állapot és Pontszám")
+        hdr_ly = QVBoxLayout(hdr_grp)
+        hdr_ly.setContentsMargins(10, 14, 10, 10)
+        hdr_ly.setSpacing(8)
+
+        top_row = QHBoxLayout()
+        self._lbl_align_status = QLabel("⏸ Kamera inaktív – Indítsd el a kamerát a pozíció beállításához")
+        self._lbl_align_status.setStyleSheet(
+            "background: #F1F5F9; color: #475569; font-weight: 700; "
+            "border-radius: 6px; padding: 8px 14px; font-size: 13px;"
+        )
+
+        self._lbl_align_score = QLabel(" Pontszám: — % ")
+        self._lbl_align_score.setStyleSheet(
+            "font-weight: 900; font-size: 15px; color: #0F5132; padding: 4px 14px; "
+            "background: #ECFDF5; border: 1px solid #6EE7B7; border-radius: 6px;"
+        )
+        top_row.addWidget(self._lbl_align_status, stretch=1)
+        top_row.addWidget(self._lbl_align_score)
+        hdr_ly.addLayout(top_row)
+
+        self._align_progress = QProgressBar()
+        self._align_progress.setRange(0, 100)
+        self._align_progress.setValue(0)
+        self._align_progress.setFormat("Illeszkedési minőség: %v%")
+        hdr_ly.addWidget(self._align_progress)
+        ly.addWidget(hdr_grp)
+
+        # 2. Kamera Megjelenítő (HUD előnézet)
+        cam_grp = QGroupBox("Élő Dual Kamera Nézet  —  Vizuális Célkeresztekkel és Utasításokkal")
+        cam_box = QVBoxLayout(cam_grp)
+        cam_box.setContentsMargins(6, 18, 6, 6)
+
+        self._align_cam_lbl = QLabel(
+            "A kamera élő képe és a HUD segédvonalak itt jelennek meg.\n\n"
+            "• Helyezd a sakktáblát pontosan a pálya közepére.\n"
+            "• Döntsd és forgass a kamerákon az alábbi utasítások alapján."
+        )
+        self._align_cam_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._align_cam_lbl.setStyleSheet(
+            "background: #0F172A; color: #94A3B8; border-radius: 8px; "
+            "font-size: 13px; font-weight: 600; padding: 20px;"
+        )
+        self._align_cam_lbl.setFixedHeight(340)
+        self._align_cam_lbl.setScaledContents(False)
+        self._align_cam_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        cam_box.addWidget(self._align_cam_lbl)
+        ly.addWidget(cam_grp)
+
+        # 3. Utasítás Kártyák (Bal Kamera | Jobb Kamera)
+        instr_row = QHBoxLayout()
+        instr_row.setSpacing(12)
+
+        left_grp = QGroupBox("📷 BAL KAMERA IGAZÍTÁSI UTASÍTÁSOK")
+        self._left_instr_box = QVBoxLayout(left_grp)
+        self._lbl_left_instr = QLabel("Indítsd el a kamerát a méréshez…")
+        self._lbl_left_instr.setStyleSheet("color: #475569; font-weight: 600; padding: 6px;")
+        self._lbl_left_instr.setWordWrap(True)
+        self._left_instr_box.addWidget(self._lbl_left_instr)
+        instr_row.addWidget(left_grp, stretch=1)
+
+        right_grp = QGroupBox("📷 JOBB KAMERA IGAZÍTÁSI UTASÍTÁSOK")
+        self._right_instr_box = QVBoxLayout(right_grp)
+        self._lbl_right_instr = QLabel("Indítsd el a kamerát a méréshez…")
+        self._lbl_right_instr.setStyleSheet("color: #475569; font-weight: 600; padding: 6px;")
+        self._lbl_right_instr.setWordWrap(True)
+        self._right_instr_box.addWidget(self._lbl_right_instr)
+        instr_row.addWidget(right_grp, stretch=1)
+
+        ly.addLayout(instr_row)
+
+        # Vezérlő sor
+        ctrl = QHBoxLayout()
+        self._btn_start_align = QPushButton("▶  Kamerák Indítása")
+        self._btn_start_align.setStyleSheet(_BTN_PRIMARY)
+        self._btn_start_align.setMinimumHeight(38)
+        self._btn_start_align.clicked.connect(self._on_start_camera)
+
+        self._btn_stop_align = QPushButton("⏹  Leállítás")
+        self._btn_stop_align.setStyleSheet(_BTN_SEC)
+        self._btn_stop_align.setMinimumHeight(38)
+        self._btn_stop_align.setEnabled(False)
+        self._btn_stop_align.clicked.connect(self._on_stop_camera)
+
+        self._btn_to_capture = QPushButton("➡  Tovább a Képrögzítéshez")
+        self._btn_to_capture.setStyleSheet(_BTN_PRIMARY)
+        self._btn_to_capture.setMinimumHeight(38)
+        self._btn_to_capture.clicked.connect(lambda: self._tabs.setCurrentIndex(2))
+
+        ctrl.addWidget(self._btn_start_align)
+        ctrl.addWidget(self._btn_stop_align)
+        ctrl.addStretch(1)
+        ctrl.addWidget(self._btn_to_capture)
+        ly.addLayout(ctrl)
+
+        return self._wrap_in_scroll(w)
+
+    def _update_alignment_ui(self, res: AlignmentResult) -> None:
+        """Frissíti az illeszkedési fül státuszát és az utasítás kártyákat."""
+        self._lbl_align_score.setText(f" Pontszám: {res.score:.0f}% ")
+        self._align_progress.setValue(int(res.score))
+        self._lbl_align_status.setText(res.general_summary)
+        self._lbl_align_status.setStyleSheet(
+            f"background: {res.status_color}22; color: {res.status_color}; font-weight: 800; "
+            f"border: 1px solid {res.status_color}; border-radius: 6px; padding: 8px 14px; font-size: 13px;"
+        )
+
+        left_html = ""
+        for ins in res.left_instructions:
+            color = "#10B981" if ins.severity == "ok" else ("#D97706" if ins.severity == "warning" else "#DC2626")
+            left_html += (
+                f"<div style='margin-bottom: 6px; font-size: 13px; color: #0F172A;'>"
+                f"<span style='font-size: 16px;'>{ins.icon}</span> &nbsp;"
+                f"<b style='color: {color};'>[{ins.value_str}]</b> {ins.text}"
+                f"</div>"
+            )
+        self._lbl_left_instr.setText(left_html if left_html else "—")
+
+        right_html = ""
+        for ins in res.right_instructions:
+            color = "#10B981" if ins.severity == "ok" else ("#D97706" if ins.severity == "warning" else "#DC2626")
+            right_html += (
+                f"<div style='margin-bottom: 6px; font-size: 13px; color: #0F172A;'>"
+                f"<span style='font-size: 16px;'>{ins.icon}</span> &nbsp;"
+                f"<b style='color: {color};'>[{ins.value_str}]</b> {ins.text}"
+                f"</div>"
+            )
+        self._lbl_right_instr.setText(right_html if right_html else "—")
 
     # --- ② Képrögzítés ---
 
@@ -900,7 +1052,11 @@ class CalibrationDialog(QDialog):
         self._capture_worker.stopped.connect(self._on_cam_stopped)
         self._capture_worker.start()
         self._btn_start.setEnabled(False)
+        if hasattr(self, "_btn_start_align"):
+            self._btn_start_align.setEnabled(False)
         self._btn_stop.setEnabled(True)
+        if hasattr(self, "_btn_stop_align"):
+            self._btn_stop_align.setEnabled(True)
         self._btn_cap.setEnabled(True)
         self._btn_clear.setEnabled(True)
         self._set_status("⏺  Kamerák aktívak – mutasd a sakktáblát!", "#DCFCE7", "#14532D")
@@ -911,8 +1067,31 @@ class CalibrationDialog(QDialog):
             self._capture_worker.stop()
             self._capture_worker.wait(4000)
 
-    @pyqtSlot(np.ndarray, np.ndarray, object, object)
-    def _on_frame(self, fl: np.ndarray, fr: np.ndarray, cl, cr) -> None:
+    @pyqtSlot(np.ndarray, np.ndarray, object, object, object)
+    def _on_frame(self, fl: np.ndarray, fr: np.ndarray, cl, cr, align_res: AlignmentResult) -> None:
+        # Frissítjük a Pozíció Beállítás fület ha az van nyitva (vagy háttérben is az adatokat)
+        if hasattr(self, "_align_cam_lbl") and align_res is not None:
+            fl_hud = draw_alignment_hud(fl, cl, is_left=True, result=align_res)
+            fr_hud = draw_alignment_hud(fr, cr, is_left=False, result=align_res)
+            if fl_hud.shape[0] > fl_hud.shape[1]:
+                target_h = 400
+                target_w = int(round(target_h * (fl_hud.shape[1] / fl_hud.shape[0])))
+            else:
+                target_w = 640
+                target_h = int(round(target_w * (fl_hud.shape[0] / fl_hud.shape[1])))
+            rl_hud = cv2.resize(fl_hud, (target_w, target_h))
+            rr_hud = cv2.resize(fr_hud, (target_w, target_h))
+            comb_hud = np.ascontiguousarray(np.hstack([rl_hud, rr_hud]))
+            cv2.line(comb_hud, (target_w, 0), (target_w, target_h), (60, 60, 60), 2)
+
+            hh, hw, hch = comb_hud.shape
+            q_align = QImage(bytes(comb_hud.data), hw, hh, hw * hch, QImage.Format.Format_BGR888)
+            px_align = QPixmap.fromImage(q_align).scaled(
+                760, 356, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            )
+            self._align_cam_lbl.setPixmap(px_align)
+            self._update_alignment_ui(align_res)
+
         both = cl is not None and cr is not None
         n    = len(self._capture_worker.collected_obj_pts) if self._capture_worker else 0
         min_f = self._spin_min.value()
@@ -925,11 +1104,17 @@ class CalibrationDialog(QDialog):
         cv2.putText(fl, txt, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.60, status_color, 2)
         cv2.putText(fr, "SPACE=mentes", (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 1)
 
-        # Rögzített (konstans) felbontású előnézeti képek (megszünteti a Qt elrendezés folyamatos belenagyítását)
-        rl = cv2.resize(fl, (640, 400))
-        rr = cv2.resize(fr, (640, 400))
+        # Rögzített felbontású előnézeti képek a képarány megőrzésével
+        if fl.shape[0] > fl.shape[1]:
+            target_h = 400
+            target_w = int(round(target_h * (fl.shape[1] / fl.shape[0])))
+        else:
+            target_w = 640
+            target_h = int(round(target_w * (fl.shape[0] / fl.shape[1])))
+        rl = cv2.resize(fl, (target_w, target_h))
+        rr = cv2.resize(fr, (target_w, target_h))
         combined = np.ascontiguousarray(np.hstack([rl, rr]))
-        cv2.line(combined, (640, 0), (640, 400), (60, 60, 60), 2)
+        cv2.line(combined, (target_w, 0), (target_w, target_h), (60, 60, 60), 2)
 
         h, w, ch = combined.shape
         q_img = QImage(bytes(combined.data), w, h, w * ch, QImage.Format.Format_BGR888)
@@ -1013,7 +1198,11 @@ class CalibrationDialog(QDialog):
     @pyqtSlot()
     def _on_cam_stopped(self) -> None:
         self._btn_start.setEnabled(True)
+        if hasattr(self, "_btn_start_align"):
+            self._btn_start_align.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        if hasattr(self, "_btn_stop_align"):
+            self._btn_stop_align.setEnabled(False)
         self._btn_cap.setEnabled(False)
         self._set_status("⏸  Kamera leállítva.", "#F1F5F9", "#475569")
 
@@ -1065,13 +1254,13 @@ class CalibrationDialog(QDialog):
                         self._run_worker.start()
                         self._btn_run.setEnabled(False)
                         self._btn_run.setText("⏳  Kalibrálás folyamatban...")
-                        self._tabs.setCurrentIndex(2)
+                        self._tabs.setCurrentIndex(3)
                         return
                     else:
                         QMessageBox.warning(
                             self, "Nincs mentésünk nyers adat",
                             f"A fájl ({npz_path.name}) nem tartalmaz nyers képpár adatokat.\n"
-                            "Készíts új kalibrációt a ② Képrögzítés fülön!"
+                            "Készíts új kalibrációt a ③ Képrögzítés fülön!"
                         )
                         return
                 except Exception as exc:
@@ -1116,7 +1305,7 @@ class CalibrationDialog(QDialog):
 
         self._btn_run.setEnabled(False)
         self._btn_run.setText("⏳  Kalibrálás folyamatban...")
-        self._tabs.setCurrentIndex(2)
+        self._tabs.setCurrentIndex(3)
 
     @pyqtSlot(str)
     def _log_append(self, msg: str) -> None:
@@ -1220,8 +1409,8 @@ class CalibrationDialog(QDialog):
         event.accept()
 
     def keyPressEvent(self, event) -> None:
-        """SPACE = képpár mentése, ha a Képrögzítés fül aktív."""
-        if event.key() == Qt.Key.Key_Space and self._tabs.currentIndex() == 1:
+        """SPACE = képpár mentése, ha a Képrögzítés fül (index 2) aktív."""
+        if event.key() == Qt.Key.Key_Space and self._tabs.currentIndex() == 2:
             self._on_capture_click()
         else:
             super().keyPressEvent(event)

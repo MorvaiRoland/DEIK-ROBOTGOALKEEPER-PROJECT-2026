@@ -92,7 +92,7 @@ class BaseCamera(ABC):
         self._offset_y: int = 0
         self._flip_h: bool = False
         self._flip_v: bool = False
-        self._rotation: int = 0
+        self._rotation: int = 0  # Landscape mód: kamerák vízszintesen szerelve
         self._exposure_us: int = 3000
         self._gain_db: float = 0.0
         self._auto_wb: bool = True

@@ -298,6 +298,7 @@ class TrackingState:
     """The newest completed inference result, independent from preview cadence."""
 
     source_sequence: int
+    source_timestamp: float
     detection: StereoBallDetection
     pos_3d: Optional[np.ndarray]
     impact: Optional[ImpactPrediction]
@@ -377,6 +378,7 @@ class DetectionWorker(threading.Thread):
         self._running = threading.Event()
         self._running.set()
         self._detector_lock = threading.Lock()
+        self._kalman_lock = threading.Lock()
         self._detector: Optional[BallDetector] = None
         roi_cfg = config.get("detection", {}).get("roi", {})
         self._roi_settings = {
@@ -457,12 +459,22 @@ class DetectionWorker(threading.Thread):
                 with self._detector_lock:
                     detection = detector.detect(snapshot.left_image, snapshot.right_image)
 
-                left_det, left_valid, left_x, left_y = self._filter_detection(
-                    detection.left, self._kalman_left
-                )
-                right_det, right_valid, right_x, right_y = self._filter_detection(
-                    detection.right, self._kalman_right
-                )
+                with self._kalman_lock:
+                    left_det, left_valid, left_x, left_y = self._filter_detection(
+                        detection.left, self._kalman_left, snapshot.timestamp
+                    )
+                    right_det, right_valid, right_x, right_y = self._filter_detection(
+                        detection.right, self._kalman_right, snapshot.timestamp
+                    )
+                    # Kalibráció nélkül is látható legyen a mozgás iránya. Ez
+                    # csak 2D, egyenes vonalú extrapoláció; kalibráció esetén a
+                    # később számolt ballisztikus 3D pálya felülírja.
+                    left_future = self._make_2d_prediction(
+                        self._kalman_left, snapshot.timestamp
+                    )
+                    right_future = self._make_2d_prediction(
+                        self._kalman_right, snapshot.timestamp
+                    )
                 detection.both_found = left_det.found and right_det.found
 
                 pos_3d: Optional[np.ndarray] = None
@@ -485,7 +497,6 @@ class DetectionWorker(threading.Thread):
 
                 # Trajektória pontok visszavetítése 2D-be (ha van kalibráció)
                 left_past, right_past = None, None
-                left_future, right_future = None, None
                 
                 if triangulator.is_calibrated:
                     history_3d = predictor.get_trajectory_history_mm()
@@ -506,6 +517,7 @@ class DetectionWorker(threading.Thread):
                 self._result_exchange.publish(
                     TrackingState(
                         source_sequence=snapshot.sequence,
+                        source_timestamp=snapshot.timestamp,
                         detection=detection,
                         pos_3d=pos_3d,
                         impact=impact,
@@ -527,17 +539,16 @@ class DetectionWorker(threading.Thread):
                 self._detector = None
             logger.info("Detektáló szál leállt")
 
-    @staticmethod
     def _filter_detection(
-        detection: BallDetection, tracker: KalmanTracker2D
+        self, detection: BallDetection, tracker: KalmanTracker2D, timestamp: float
     ) -> Tuple[BallDetection, bool, float, float]:
         if detection.found:
-            x, y = tracker.update(detection.x, detection.y)
+            x, y = tracker.update(detection.x, detection.y, timestamp)
             detection.x, detection.y = x, y
             return detection, True, x, y
 
         if tracker.is_initialized:
-            x, y = tracker.predict()
+            x, y = tracker.predict(timestamp)
             if x > 0 and y > 0:
                 radius = detection.radius if detection.radius > 0 else 25.0
                 detection.found = True
@@ -547,6 +558,53 @@ class DetectionWorker(threading.Thread):
                 return detection, True, x, y
 
         return detection, False, 0.0, 0.0
+
+    @staticmethod
+    def _make_2d_prediction(
+        tracker: KalmanTracker2D,
+        timestamp: float,
+        horizon_s: float = 0.50,
+        point_count: int = 12,
+    ) -> Optional[np.ndarray]:
+        """Kalibráció előtti, képsíkbeli irányjelző pálya."""
+        vx, vy = tracker.velocity_pixels_s
+        if not tracker.is_initialized or np.hypot(vx, vy) < 25.0:
+            return None
+
+        times = np.linspace(0.0, horizon_s, point_count)
+        return np.array(
+            [tracker.project(timestamp + float(dt), horizon_s) for dt in times],
+            dtype=np.float32,
+        )
+
+    def project_detection_for_display(
+        self,
+        detection: BallDetection,
+        is_left: bool,
+        display_timestamp: float,
+        max_horizon_s: float,
+    ) -> BallDetection:
+        """A korábbi inferenciaeredményt az aktuális preview frame-re vetíti."""
+        if not detection.found:
+            return detection
+
+        tracker = self._kalman_left if is_left else self._kalman_right
+        with self._kalman_lock:
+            x, y = tracker.project(display_timestamp, max_horizon_s)
+        if x <= 0.0 or y <= 0.0:
+            return detection
+
+        radius = detection.radius
+        return BallDetection(
+            found=True,
+            x=x,
+            y=y,
+            radius=radius,
+            confidence=detection.confidence,
+            track_id=detection.track_id,
+            bbox=(x - radius, y - radius, x + radius, y + radius),
+            timestamp=detection.timestamp,
+        )
 
     @staticmethod
     def _make_roi(roi_cfg: dict) -> dict:
@@ -586,6 +644,10 @@ class TrackerWorker(QThread):
         self._gui_fps_limit = float(config.get("gui", {}).get("gui_fps_limit", 60))
         self._gui_interval = 1.0 / self._gui_fps_limit
         self._last_gui_emit = 0.0
+        kalman_cfg = config.get("detection", {}).get("kalman", {})
+        self._display_prediction_horizon_s = float(
+            kalman_cfg.get("display_prediction_horizon_s", 0.15)
+        )
 
     def stop(self) -> None:
         self._running = False
@@ -722,14 +784,32 @@ class TrackerWorker(QThread):
                 self._draw_roi(frame_left, is_left=True)
                 self._draw_roi(frame_right, is_left=False)
 
-                left_det = state.detection.left if state else BallDetection()
-                right_det = state.detection.right if state else BallDetection()
+                # A state a korábbi forrásframe-hez tartozik. A Kalman állapot
+                # az aktuális preview idejére vetítve megszünteti a látható lagot.
+                left_det = (
+                    self._detection_worker.project_detection_for_display(
+                        state.detection.left,
+                        True,
+                        snapshot.timestamp,
+                        self._display_prediction_horizon_s,
+                    )
+                    if state and self._detection_worker else BallDetection()
+                )
+                right_det = (
+                    self._detection_worker.project_detection_for_display(
+                        state.detection.right,
+                        False,
+                        snapshot.timestamp,
+                        self._display_prediction_horizon_s,
+                    )
+                    if state and self._detection_worker else BallDetection()
+                )
                 if overlay_cfg.get("show_detection_box", True):
                     self._draw_detection(frame_left, left_det)
                     self._draw_detection(frame_right, right_det)
                     
                 # 3D trajektória (múlt és jövő) vizualizációja
-                if state:
+                if state and overlay_cfg.get("show_trajectory", True):
                     self._draw_trajectory(frame_left, state.left_past_2d, state.left_future_2d)
                     self._draw_trajectory(frame_right, state.right_past_2d, state.right_future_2d)
 
@@ -757,7 +837,16 @@ class TrackerWorker(QThread):
                     "speed_ms": np.sqrt(vx**2 + vy**2 + vz**2) / 1000.0,
                     "impact": impact,
                     "calibrated": state.calibrated if state else False,
-                    "detection_age_ms": (now - state.completed_at) * 1000.0 if state else 0.0,
+                    # Teljes képkori késés: a zöld jelöléshez tartozó bemeneti
+                    # frame és az épp kijelzett kamera-frame közti idő.
+                    "detection_age_ms": (
+                        (snapshot.timestamp - state.source_timestamp) * 1000.0
+                        if state else 0.0
+                    ),
+                    "detection_inference_ms": (
+                        (state.completed_at - state.source_timestamp) * 1000.0
+                        if state else 0.0
+                    ),
                     "detection_frame_lag": self._snapshot_sequence - state.source_sequence if state else 0,
                 }
                 self.frames_ready.emit(frame_left, frame_right, stats)
@@ -813,11 +902,7 @@ class TrackerWorker(QThread):
         past_2d: Optional[np.ndarray],
         future_2d: Optional[np.ndarray]
     ) -> None:
-        """
-        Kirajzolja a labda térbeli 3D trajektóriájának pontjait.
-        (Ideiglenesen kikapcsolva a felhasználó kérésére)
-        """
-        return
+        """Kirajzolja a mért csóvát és a várható röppálya ívét a képre."""
 
         # Készítünk egy átlátszó réteget (overlay) a finom áttűnésekhez
         overlay = frame.copy()
@@ -848,9 +933,12 @@ class TrackerWorker(QThread):
                 thickness = max(1, int(6 * ratio))
                 cv2.line(overlay, pt1, pt2, color, thickness, cv2.LINE_AA)
                 
-        # 2. Jövőbeli becsapódási pálya rajzolása (ciánkék ív, elvékonyodó)
+        # 2. Jövőbeli röppálya: erős sárga, pontozott ív. A pontok a 3D
+        # ballisztikus predikció mintái, a vonal kizárólag a köztük lévő
+        # érvényes szakaszokat köti össze.
         if future_2d is not None and len(future_2d) >= 2:
             n = len(future_2d)
+            first_valid_pt = None
             for i in range(n - 1):
                 x1, y1 = future_2d[i, 0], future_2d[i, 1]
                 x2, y2 = future_2d[i+1, 0], future_2d[i+1, 1]
@@ -866,18 +954,28 @@ class TrackerWorker(QThread):
 
                 pt1 = (int(x1), int(y1))
                 pt2 = (int(x2), int(y2))
-                
-                # Vastagság csökken a jövőbe haladva a becsapódás felé
-                ratio = 1.0 - (i / n)
-                color = (255, 200, 50)  # BGR: cián / világoskék
-                thickness = max(2, int(5 * ratio))
-                cv2.line(overlay, pt1, pt2, color, thickness, cv2.LINE_AA)
+
+                if first_valid_pt is None:
+                    first_valid_pt = pt1
+                # A folytonos, vékony alapívhez minden második szakaszon
+                # vastagabb sárga jelölés kerül, így gyors mozgásnál is jól
+                # olvasható marad és megkülönböztethető a múltbeli csóvától.
+                cv2.line(overlay, pt1, pt2, (0, 180, 255), 2, cv2.LINE_AA)
+                if i % 2 == 0:
+                    cv2.circle(overlay, pt1, 3, (0, 255, 255), -1, cv2.LINE_AA)
+
+            if first_valid_pt is not None:
+                cv2.putText(
+                    overlay, "PREDIKALT PALYA",
+                    (first_valid_pt[0] + 8, max(20, first_valid_pt[1] - 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 255), 1, cv2.LINE_AA,
+                )
 
             # Várható érkezési / landolási pont megjelölése célkereszttel
             last_x, last_y = future_2d[-1, 0], future_2d[-1, 1]
             if not np.isnan(last_x) and not np.isnan(last_y) and abs(last_x) < 10000 and abs(last_y) < 10000:
                 end_pt = (int(last_x), int(last_y))
-                cv2.circle(overlay, end_pt, 8, (255, 200, 50), 2, cv2.LINE_AA)
+                cv2.circle(overlay, end_pt, 8, (0, 180, 255), 2, cv2.LINE_AA)
                 cv2.circle(overlay, end_pt, 3, (0, 255, 255), -1, cv2.LINE_AA)
                 
         # Átlátszó (alpha blending) összekeverés az eredeti képpel
@@ -1438,7 +1536,7 @@ class MainWindow(QMainWindow):
         combo_rot = QComboBox()
         combo_rot.addItems(["0°", "90°", "180°", "270°"])
         rot_map = {0: 0, 90: 1, 180: 2, 270: 3}
-        combo_rot.setCurrentIndex(rot_map.get(int(cam_cfg.get("rotation", 0)), 0))
+        combo_rot.setCurrentIndex(rot_map.get(int(cam_cfg.get("rotation", 90)), 1))
 
         h_flips = QHBoxLayout()
         h_flips.addWidget(chk_fliph)
@@ -1987,7 +2085,7 @@ class MainWindow(QMainWindow):
                     w["spin_gain"].setValue(0.0)
                     w["chk_fliph"].setChecked(False)
                     w["chk_flipv"].setChecked(False)
-                    w["combo_rot"].setCurrentIndex(0)
+                    w["combo_rot"].setCurrentIndex(1)
 
     def _start_tracker(self) -> None:
         logger.info("Tracker indítása...")

@@ -28,6 +28,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from camera.base_camera import BaseCamera, CameraFrame
+from camera.camera_utils import ensure_usbfs_memory_mb
 from camera.ximea_camera import XimeaCamera
 from camera.mock_camera import MockCamera
 
@@ -109,6 +110,7 @@ class CameraManager:
             True ha MINDKÉT kamera sikeresen megnyitva.
         """
         logger.info("Mindkét kamera párhuzamos megnyitása...")
+        ensure_usbfs_memory_mb(0)
 
         # Kamera objektumok létrehozása a típus alapján
         self._cam_left = self._create_camera(is_left=True)
