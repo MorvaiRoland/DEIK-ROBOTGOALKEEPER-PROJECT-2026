@@ -52,6 +52,7 @@ class StereoPair:
     timestamp: float
     pair_id: int
     success: bool
+    sync_delta_ms: float = 0.0  # Szoftver szinkron jitter (ms) – 0 ha hw trigger aktív
 
 
 class CameraManager:
@@ -194,12 +195,26 @@ class CameraManager:
 
         success = frame_left.success and frame_right.success
 
+        # Szinkron jitter mérése: a két frame timestamp különbsége
+        sync_delta_ms = 0.0
+        if frame_left.success and frame_right.success:
+            sync_delta_ms = abs(frame_left.timestamp - frame_right.timestamp) * 1000.0
+            if sync_delta_ms > 5.0:
+                logger.warning(
+                    "Sztereo szinkron jitter NAGY: %.1f ms (bal=%.3f, jobb=%.3f) "
+                    "→ 3D pontossági hiba lehetséges!",
+                    sync_delta_ms,
+                    frame_left.timestamp,
+                    frame_right.timestamp,
+                )
+
         return StereoPair(
             left=frame_left,
             right=frame_right,
             timestamp=now,
             pair_id=self._pair_count,
             success=success,
+            sync_delta_ms=sync_delta_ms,
         )
 
     # ------------------------------------------------------------------

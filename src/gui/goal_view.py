@@ -24,7 +24,7 @@ from PyQt6.QtGui import (
 )
 # pyrefly: ignore [missing-import]
 # type: ignore
-from PyQt6.QtWidgets import QSizePolicy, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +70,38 @@ class GoalViewWidget(QWidget):
         self._gk_reach_width_mm: float = 800.0    # Védési pajzs szélessége (mm)
         self._gk_state: str = "IDLE"              # "IDLE" | "MOVING" | "DEFENDED" | "MISSED"
 
-        # Dark mód
+        # Dark mód & 2D / 3D Nézet mód
         self._dark: bool = False
+        self._mode_3d: bool = False
+
+        # Status QLabel a bal felső sarokban
+        self._lbl_hud_status = QLabel("PÁLYAKÖVETÉS AKTÍV | LÖVÉSEK: 0 DB")
+
+        # Valódi Natív QPushButtonek a 2D / 3D váltáshoz
+        self._btn_mode_2d = QPushButton("2D KAPU", self)
+        self._btn_mode_3d = QPushButton("3D PÁLYA", self)
+        for b in [self._btn_mode_2d, self._btn_mode_3d]:
+            b.setFixedSize(72, 24)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self._btn_mode_2d.clicked.connect(lambda _=False: self.set_mode_3d(False))
+        self._btn_mode_3d.clicked.connect(lambda _=False: self.set_mode_3d(True))
+
+        top_layout = QHBoxLayout()
+        top_layout.setContentsMargins(8, 4, 8, 0)
+        top_layout.setSpacing(4)
+        top_layout.addWidget(self._lbl_hud_status, stretch=1)
+        top_layout.addWidget(self._btn_mode_2d)
+        top_layout.addWidget(self._btn_mode_3d)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addLayout(top_layout)
+        main_layout.addStretch()
+
+        self._update_mode_button_styles()
+        self._update_hud_status_label()
 
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._on_animation_tick)
@@ -82,10 +112,64 @@ class GoalViewWidget(QWidget):
 
     # ── Public API ───────────────────────────────────────────────────────────
 
+    def set_mode_3d(self, mode_3d: bool) -> None:
+        """Vált a 2D Kapu és 3D Pálya nézet között."""
+        self._mode_3d = bool(mode_3d)
+        self._update_mode_button_styles()
+        self.update()
+
     def set_dark(self, dark: bool) -> None:
         """Téma váltás."""
         self._dark = dark
+        self._update_mode_button_styles()
+        self._update_hud_status_label()
         self.update()
+
+    def _update_mode_button_styles(self) -> None:
+        """Gombok stílusának frissítése téma és aktív módtól függően."""
+        if not hasattr(self, "_btn_mode_2d"):
+            return
+        dark = getattr(self, "_dark", False)
+        mode3d = getattr(self, "_mode_3d", False)
+
+        active_s = (
+            "QPushButton { background-color: #0F5132; color: #FFFFFF; font-weight: 800; "
+            "font-size: 11px; border-radius: 5px; border: 1.5px solid #10B981; padding: 0 4px; }"
+            "QPushButton:hover { background-color: #146C43; color: #FFFFFF; }"
+        )
+        inactive_s = (
+            "QPushButton { background-color: #151D2A; color: #94A3B8; font-weight: 700; "
+            "font-size: 11px; border-radius: 5px; border: 1px solid #26334D; padding: 0 4px; }"
+            "QPushButton:hover { background-color: #1E293B; color: #4ADE80; border-color: #4ADE80; }"
+            if dark else
+            "QPushButton { background-color: #F1F5F9; color: #334155; font-weight: 700; "
+            "font-size: 11px; border-radius: 5px; border: 1px solid #CBD5E1; padding: 0 4px; }"
+            "QPushButton:hover { background-color: #E2E8F0; color: #0F5132; }"
+        )
+
+        self._btn_mode_2d.setStyleSheet(active_s if not mode3d else inactive_s)
+        self._btn_mode_3d.setStyleSheet(active_s if mode3d else inactive_s)
+
+    def _update_hud_status_label(self) -> None:
+        """Frissíti a bal felső QLabel státusz szövegét és téma szerinti színét."""
+        if not hasattr(self, "_lbl_hud_status"):
+            return
+        dark = getattr(self, "_dark", False)
+        stats = self.get_stats()
+        if stats["total"] > 0:
+            hist_str = f" | LÖVÉS: {stats['total']:.0f} (GÓL: {stats['in_goal']:.0f})"
+        else:
+            hist_str = f" | LÖVÉSEK: {len(self._shot_history)} DB"
+
+        if self._impact_x_mm is not None:
+            st_txt = f"BECSAPÓDÁS DETEKTÁLVA{hist_str}"
+            color = "#4ADE80" if dark else "#0F5132"
+        else:
+            st_txt = f"PÁLYAKÖVETÉS AKTÍV{hist_str}"
+            color = "#94A3B8" if dark else "#475569"
+
+        self._lbl_hud_status.setText(st_txt)
+        self._lbl_hud_status.setStyleSheet(f"font-size: 11px; font-weight: 800; color: {color}; background: transparent;")
 
     def set_goalkeeper_target(self, x_mm: float, y_mm: float = 1000.0) -> None:
         """Beállítja a dőlési célpozíciót az X koordináta alapján (középről balra/jobbra dőlés)."""
@@ -121,7 +205,9 @@ class GoalViewWidget(QWidget):
             self._impact_conf      = 0.0
             self._time_to_impact_s = 0.0
             self._in_goal          = False
-            self.update()
+        
+        self._update_hud_status_label()
+        self.update()
 
     def reset_stats(self) -> None:
         """Szerver / GUI által meghívható statisztika törlés."""
@@ -202,6 +288,18 @@ class GoalViewWidget(QWidget):
 
         self.update()
 
+    # ── Public API ───────────────────────────────────────────────────────────
+
+    def set_mode_3d(self, mode_3d: bool) -> None:
+        """Vált a 2D Kapu és 3D Pálya nézet között."""
+        self._mode_3d = mode_3d
+        self.update()
+
+    def set_dark(self, dark: bool) -> None:
+        """Téma váltás."""
+        self._dark = dark
+        self.update()
+
     # ── Paint ────────────────────────────────────────────────────────────────
 
     def paintEvent(self, event) -> None:
@@ -211,38 +309,189 @@ class GoalViewWidget(QWidget):
 
         w, h = self.width(), self.height()
 
-        bg_color = QColor("#1E293B") if self._dark else QColor("#FFFFFF")
+        bg_color = QColor("#0F172A") if self._dark else QColor("#F8FAFC")
         painter.fillRect(0, 0, w, h, QBrush(bg_color))
 
-        margin_x      = 45
-        margin_top    = 35
         margin_bottom = 52   # plusz hely: konfidencia sáv
 
-        draw_w = w - 2 * margin_x
-        draw_h = h - margin_top - margin_bottom
-
-        aspect_goal = self._goal_width_mm / self._goal_height_mm
-        if draw_w / draw_h > aspect_goal:
-            rect_h = draw_h
-            rect_w = rect_h * aspect_goal
+        if self._mode_3d:
+            self._draw_3d_pitch_view(painter, w, h)
         else:
-            rect_w = draw_w
-            rect_h = rect_w / aspect_goal
+            margin_x   = 45
+            margin_top = 35
 
-        rect_x = (w - rect_w) / 2.0
-        rect_y = margin_top + (draw_h - rect_h) / 2.0
+            draw_w = w - 2 * margin_x
+            draw_h = h - margin_top - margin_bottom
 
-        goal_rect = QRectF(rect_x, rect_y, rect_w, rect_h)
+            aspect_goal = self._goal_width_mm / self._goal_height_mm
+            if draw_w / draw_h > aspect_goal:
+                rect_h = draw_h
+                rect_w = rect_h * aspect_goal
+            else:
+                rect_w = draw_w
+                rect_h = rect_w / aspect_goal
 
-        self._draw_net_and_frame(painter, goal_rect)
-        self._draw_history(painter, goal_rect)
-        self._draw_robot_goalkeeper(painter, goal_rect)
+            rect_x = (w - rect_w) / 2.0
+            rect_y = margin_top + (draw_h - rect_h) / 2.0
 
-        if self._impact_x_mm is not None and self._impact_y_mm is not None:
-            self._draw_active_target(painter, goal_rect)
+            goal_rect = QRectF(rect_x, rect_y, rect_w, rect_h)
 
-        self._draw_hud_overlay_text(painter, goal_rect, w, h)
+            self._draw_net_and_frame(painter, goal_rect)
+            self._draw_history(painter, goal_rect)
+            self._draw_robot_goalkeeper(painter, goal_rect)
+
+            if self._impact_x_mm is not None and self._impact_y_mm is not None:
+                self._draw_active_target(painter, goal_rect)
         self._draw_confidence_bar(painter, w, h, margin_bottom)
+
+    def _project_3d(self, x_mm: float, y_mm: float, z_mm: float, w: int, h: int) -> QPointF:
+        """3D perspektivikus koordináta leképezés (X, Y, Z mm -> képernyő pixel)."""
+        # Y_mm: 0 mm (Kapuvonal) .. 10000 mm (10-méteres rúgó pont)
+        # Z_mm: 0 mm (Talaj) .. 2000 mm (Kapumagasság)
+        norm_y = max(0.0, min(1.0, y_mm / 10000.0))
+
+        # Perspektivikus skála a távolság függvényében (közel=nagy, távol=kicsi)
+        scale = 1.0 - norm_y * 0.58
+
+        center_x = w / 2.0
+        # Kapuvonal Y pixele a képernyőn (felső harmad)
+        goal_y_px = h * 0.38
+        # Rúgó pont Y pixele (alsó részen)
+        kick_y_px = h * 0.88
+
+        py = goal_y_px + norm_y * (kick_y_px - goal_y_px)
+        px = center_x + (x_mm / (self._goal_width_mm / 2.0)) * (w * 0.28) * scale
+
+        # Magasság (Z) emelkedés eltolása felfelé
+        pz = py - (z_mm / self._goal_height_mm) * (h * 0.26) * scale
+        return QPointF(px, pz)
+
+    def _draw_3d_pitch_view(self, painter: QPainter, w: int, h: int) -> None:
+        """3D Perspektivikus 10 méteres Focipálya & Trajektória Kirajzolás."""
+        # 1. 3D Zöld Focipálya Gradiens Talaj
+        p_top_l = self._project_3d(-self._goal_width_mm / 2.0 - 1500, 0, 0, w, h)
+        p_top_r = self._project_3d(self._goal_width_mm / 2.0 + 1500, 0, 0, w, h)
+        p_bot_r = self._project_3d(self._goal_width_mm / 2.0 + 2500, 10000, 0, w, h)
+        p_bot_l = self._project_3d(-self._goal_width_mm / 2.0 - 2500, 10000, 0, w, h)
+
+        pitch_poly = QPolygonF([p_top_l, p_top_r, p_bot_r, p_bot_l])
+
+        pitch_grad = QLinearGradient(0, p_top_l.y(), 0, p_bot_l.y())
+        pitch_grad.setColorAt(0.0, QColor("#064E3B") if self._dark else QColor("#15803D"))
+        pitch_grad.setColorAt(1.0, QColor("#022C22") if self._dark else QColor("#166534"))
+
+        painter.setPen(QPen(QColor("#10B981"), 2))
+        painter.setBrush(QBrush(pitch_grad))
+        painter.drawPolygon(pitch_poly)
+
+        # 3D Pálya fehéredő vonalai (10m büntető sáv, kapuvonal, csíkozás)
+        pen_lines = QPen(QColor(255, 255, 255, 180), 2)
+        painter.setPen(pen_lines)
+
+        # Kapuvonal
+        p_g_l = self._project_3d(-self._goal_width_mm / 2.0, 0, 0, w, h)
+        p_g_r = self._project_3d(self._goal_width_mm / 2.0, 0, 0, w, h)
+        painter.drawLine(p_g_l, p_g_r)
+
+        # 10m Büntető rúgó pont (Középen alul)
+        p_kick = self._project_3d(0, 10000, 0, w, h)
+        painter.setBrush(QBrush(QColor("#FFFFFF")))
+        painter.drawEllipse(p_kick, 6, 4)
+
+        # 10m Büntető ív / kör
+        p_kick_l = self._project_3d(-1000, 10000, 0, w, h)
+        p_kick_r = self._project_3d(1000, 10000, 0, w, h)
+        painter.drawLine(p_kick_l, p_kick_r)
+
+        # 2. 3D Kapu keret (Post & Crossbar)
+        p_goal_bl = self._project_3d(-self._goal_width_mm / 2.0, 0, 0, w, h)
+        p_goal_br = self._project_3d(self._goal_width_mm / 2.0, 0, 0, w, h)
+        p_goal_tl = self._project_3d(-self._goal_width_mm / 2.0, 0, self._goal_height_mm, w, h)
+        p_goal_tr = self._project_3d(self._goal_width_mm / 2.0, 0, self._goal_height_mm, w, h)
+
+        # Hátsó 3D háló keret eltolása (Z=0, Y=-1000 mm mélység)
+        p_net_tl = self._project_3d(-self._goal_width_mm / 2.0, -800, self._goal_height_mm, w, h)
+        p_net_tr = self._project_3d(self._goal_width_mm / 2.0, -800, self._goal_height_mm, w, h)
+        p_net_bl = self._project_3d(-self._goal_width_mm / 2.0, -800, 0, w, h)
+        p_net_br = self._project_3d(self._goal_width_mm / 2.0, -800, 0, w, h)
+
+        # Háló mélységi vonalak
+        net_pen = QPen(QColor(148, 163, 184, 120) if self._dark else QColor(100, 116, 139, 140), 1, Qt.PenStyle.DashLine)
+        painter.setPen(net_pen)
+        painter.drawLine(p_goal_tl, p_net_tl)
+        painter.drawLine(p_goal_tr, p_net_tr)
+        painter.drawLine(p_goal_bl, p_net_bl)
+        painter.drawLine(p_goal_br, p_net_br)
+        painter.drawLine(p_net_tl, p_net_tr)
+        painter.drawLine(p_net_bl, p_net_br)
+        painter.drawLine(p_net_tl, p_net_bl)
+        painter.drawLine(p_net_tr, p_net_br)
+
+        # Kapu Keret (Fehér vastag léc)
+        pen_frame = QPen(QColor("#FFFFFF"), 4)
+        painter.setPen(pen_frame)
+        painter.drawLine(p_goal_bl, p_goal_tl)
+        painter.drawLine(p_goal_tl, p_goal_tr)
+        painter.drawLine(p_goal_tr, p_goal_br)
+
+        # 3. 3D Dőlő Robot Kapus kirajzolása a kapuvonal közepén
+        p_pivot = self._project_3d(0, 0, 0, w, h)
+        painter.save()
+        painter.translate(p_pivot)
+        painter.rotate(self._gk_tilt_angle_deg)
+
+        gk_color = QColor(16, 185, 129, 230) if self._gk_state == "DEFENDED" else QColor(59, 130, 246, 210)
+        painter.setPen(QPen(QColor("#34D399"), 2))
+        painter.setBrush(QBrush(gk_color))
+
+        # Dőlő kapus figura a 3D nézetben
+        torso_h_3d = (p_goal_bl.y() - p_goal_tl.y()) * 0.6
+        painter.drawRoundedRect(QRectF(-12, -torso_h_3d, 24, torso_h_3d), 4, 4)
+        painter.drawRoundedRect(QRectF(-35, -torso_h_3d - 16, 70, 24), 6, 6)
+        painter.restore()
+
+        # 4. 3D Parabola Labda Trajektória Görbe (Csak aktív detektálás / mérés esetén!)
+        if self._impact_x_mm is not None and self._impact_y_mm is not None:
+            target_x = self._impact_x_mm
+            target_z = self._impact_y_mm
+
+            traj_pts: List[QPointF] = []
+            steps = 40
+            for i in range(steps + 1):
+                t = i / float(steps)  # t=0: rúgó pont (Y=10000), t=1: kapuvonal (Y=0)
+                cur_y = 10000.0 * (1.0 - t)
+                cur_x = target_x * t
+                # Parabola ív emelkedés (csúcs magasság ~1.8m a pálya közepén)
+                cur_z = 4.0 * 1800.0 * t * (1.0 - t) + target_z * (t ** 2)
+
+                pt_3d = self._project_3d(cur_x, cur_y, cur_z, w, h)
+                traj_pts.append(pt_3d)
+
+            # Fénylő Zöld -> Arany 3D Trajektória Cső
+            for i in range(len(traj_pts) - 1):
+                t_norm = i / float(steps)
+                c_line = QColor(16, 185, 129) if t_norm < 0.5 else QColor(245, 158, 11)
+                painter.setPen(QPen(c_line, 3.5, Qt.PenStyle.SolidLine))
+                painter.drawLine(traj_pts[i], traj_pts[i + 1])
+
+            # Animált 3D Labda Pozíció a Parabola Íven
+            ball_t = (math.sin(self._anim_phase * 0.8) + 1.0) / 2.0  # 0.0 .. 1.0 folyamatos mozgás
+            ball_idx = int(ball_t * steps)
+            ball_pt = traj_pts[min(steps, max(0, ball_idx))]
+
+            self._draw_yellow_ball_icon(painter, ball_pt.x(), ball_pt.y(), radius=12.0)
+        else:
+            # Nincs aktív lövés: tiszta pálya felirat
+            font_idle = QFont("Segoe UI", 9, QFont.Weight.Bold)
+            painter.setFont(font_idle)
+            painter.setPen(QPen(QColor("#94A3B8") if self._dark else QColor("#64748B")))
+            painter.drawText(QRectF(15, h * 0.74, w - 30, 24), Qt.AlignmentFlag.AlignCenter, "Nincs aktív predikció – várakozás labda detektálásra...")
+
+        # 3D Címke / HUD
+        font_hud3d = QFont("Segoe UI", 9, QFont.Weight.Bold)
+        painter.setFont(font_hud3d)
+        painter.setPen(QPen(QColor("#10B981") if self._dark else QColor("#0F5132")))
+        painter.drawText(QRectF(12, 30, 280, 20), Qt.AlignmentFlag.AlignLeft, "ÉLŐ 3D PARABOLA TRAJEKTÓRIA (10 MÉTER)")
 
     def _draw_robot_goalkeeper(self, painter: QPainter, goal_rect: QRectF) -> None:
         """Kirajzolja a középen álló, balra/jobbra dőlő robot kapus szimulációt."""
@@ -437,30 +686,27 @@ class GoalViewWidget(QWidget):
         painter.drawText(lbl_r, Qt.AlignmentFlag.AlignCenter, tag)
 
     def _draw_hud_overlay_text(self, painter: QPainter, goal_rect: QRectF, w: int, h: int) -> None:
-        font_hud = QFont("Segoe UI", 9, QFont.Weight.Bold)
+        font_hud = QFont("Segoe UI", 8, QFont.Weight.Bold)
         painter.setFont(font_hud)
 
         text_color = QColor("#94A3B8") if self._dark else QColor("#475569")
 
-        if self._impact_x_mm is not None:
-            st_txt   = "DETEKTÁLT BECSAPÓDÁS"
-            st_color = QColor("#4ADE80") if self._dark else QColor("#0F5132")
-        else:
-            st_txt   = "PÁLYAKÖVETÉS AKTÍV"
-            st_color = text_color
-
-        painter.setPen(QPen(st_color))
-        painter.drawText(14, 20, st_txt)
-
-        # Lövési statisztika rövid formában (jobb felső)
         stats = self.get_stats()
         if stats["total"] > 0:
             pct = stats["in_goal_pct"]
-            hist_txt = f"LÖVÉS: {stats['total']} | GOL: {stats['in_goal']} ({pct:.0f}%)"
+            hist_str = f" | LÖVÉS: {stats['total']} (GÓL: {stats['in_goal']})"
         else:
-            hist_txt = f"LÖVÉSEK: {len(self._shot_history)} DB"
-        painter.setPen(QPen(text_color))
-        painter.drawText(w - 220, 20, hist_txt)
+            hist_str = f" | LÖVÉSEK: {len(self._shot_history)} DB"
+
+        if self._impact_x_mm is not None:
+            st_txt   = f"BECSAPÓDÁS DETEKTÁLVA{hist_str}"
+            st_color = QColor("#4ADE80") if self._dark else QColor("#0F5132")
+        else:
+            st_txt   = f"PÁLYAKÖVETÉS AKTÍV{hist_str}"
+            st_color = text_color
+
+        painter.setPen(QPen(st_color))
+        painter.drawText(12, 18, st_txt)
 
     def _draw_confidence_bar(self, painter: QPainter, w: int, h: int, margin_bottom: int) -> None:
         """Konfidencia sáv a kapu rajz alatt."""

@@ -215,6 +215,8 @@ class TrajectoryPredictor:
         Hozzáad egy új 3D pozíció-mérést a historikához.
 
         A Kalman szűrő azonnal frissíti a sebesség- és pozíciobecslést.
+        4-15 pont között RANSAC parabolaillesztéssel pontosabb kezdeti
+        sebességbecslést injektálunk a Kalmanba.
 
         Args:
             x_mm: Vízszintes pozíció mm-ben
@@ -225,8 +227,111 @@ class TrajectoryPredictor:
         point = TrajectoryPoint(x=x_mm, y=y_mm, z=z_mm, timestamp=now)
         self._history.append(point)
 
-        # 3D Kalman szűrő frissítése
+        # EKF frissítés
         self._kalman_update(x_mm, y_mm, z_mm, now)
+
+        # RANSAC bootstrap: 6-15 pont között egyszer futtatjuk a parabola-illesztést,
+        # de CSAK AKKOR írjuk felül a Kalman állapotot, ha a labda valóban mozgásban van
+        # és a kapu felé tart (vz < -400 mm/s, speed > 1000 mm/s). Álló labdánál tiltva!
+        n = len(self._history)
+        if 6 <= n <= 15:
+            ransac_vel = self._ransac_trajectory_fit(list(self._history))
+            if ransac_vel is not None and self._kalman_initialized:
+                speed = float(np.linalg.norm(ransac_vel))
+                vz = float(ransac_vel[2])
+                if 1000.0 <= speed <= 40000.0 and vz < -400.0:
+                    self._kalman_state[3] = ransac_vel[0]
+                    self._kalman_state[4] = ransac_vel[1]
+                    self._kalman_state[5] = ransac_vel[2]
+                    logger.debug(
+                        "RANSAC velocity bootstrap: vx=%.0f, vy=%.0f, vz=%.0f mm/s",
+                        *ransac_vel
+                    )
+
+    def _ransac_trajectory_fit(
+        self, history: List[TrajectoryPoint], n_iter: int = 40, inlier_thresh_mm: float = 60.0
+    ) -> Optional[np.ndarray]:
+        """
+        RANSAC-alapú, gravitáció-kényszeres parabolaillesztés a 3D historikán.
+
+        A pálya fizikai modellje:
+            X(t) = x0 + vx * t
+            Y(t) = y0 + vy * t - 0.5 * g * t²   ← g ismert kényszer
+            Z(t) = z0 + vz * t
+
+        Mivel g ismert, az illesztés lineáris (x0, vx, vy, vz) paramétereire.
+
+        Args:
+            history:          Trajektória historika (TrajectoryPoint lista)
+            n_iter:           RANSAC iterációk száma
+            inlier_thresh_mm: Inlier küszöb mm-ben
+
+        Returns:
+            np.ndarray([vx, vy, vz]) mm/s, vagy None ha nem konvergens
+        """
+        n = len(history)
+        if n < 4:
+            return None
+
+        t0 = history[0].timestamp
+        times = np.array([p.timestamp - t0 for p in history], dtype=np.float64)
+        X = np.array([[p.x, p.y, p.z] for p in history], dtype=np.float64)
+
+        g_mm = self._gravity_mm_s2  # mm/s²
+
+        # Gravitáció korrekcióval: Y komponensből kivonjuk a gravitáció hatását,
+        # így lineárissá válik az illesztési feladat.
+        Y_corrected = X.copy()
+        Y_corrected[:, 1] += 0.5 * g_mm * times**2  # Y += 0.5*g*t²
+
+        # Lineáris illesztési mátrix: A = [1, t] → A @ [x0; v] = Y_corr
+        A = np.column_stack([np.ones(n), times])
+
+        best_vel = None
+        best_inlier_count = 0
+        best_inliers = None
+
+        rng = np.random.default_rng(seed=42)
+
+        for _ in range(n_iter):
+            # 2 véletlen pont (minimum az egyenes illesztéshez)
+            idx = rng.choice(n, 2, replace=False)
+            A_s = A[idx]
+            Y_s = Y_corrected[idx]
+
+            try:
+                # Legkisebb négyzetek: [x0, v] = A_s⁺ @ Y_s
+                params, _, _, _ = np.linalg.lstsq(A_s, Y_s, rcond=None)
+            except np.linalg.LinAlgError:
+                continue
+
+            # Residuálisok számítása az összes pontra
+            Y_pred = A @ params
+            # Visszaadjuk a gravitáció korrekciót, majd 3D távolság
+            # A pred Y komponenst vissza kell korrigálni: Y_pred[1] - 0.5*g*t²
+            pred_3d = Y_pred.copy()
+            pred_3d[:, 1] -= 0.5 * g_mm * times**2
+            residuals = np.linalg.norm(X - pred_3d, axis=1)
+            inliers = residuals < inlier_thresh_mm
+            count = int(np.sum(inliers))
+
+            if count > best_inlier_count:
+                best_inlier_count = count
+                best_inliers = inliers
+                best_vel = params[1]  # sebesség komponensek (vx, vy, vz)
+
+        if best_inliers is None or best_inlier_count < 3:
+            return None
+
+        # Végső illesztés az összes inlier ponton
+        try:
+            params_final, _, _, _ = np.linalg.lstsq(
+                A[best_inliers], Y_corrected[best_inliers], rcond=None
+            )
+            vel = params_final[1]  # [vx, vy, vz] mm/s
+            return vel
+        except np.linalg.LinAlgError:
+            return best_vel
 
     def reset(self) -> None:
         """
@@ -414,12 +519,16 @@ class TrajectoryPredictor:
             return ImpactPrediction(valid=False)
 
     # ------------------------------------------------------------------
-    # 3D Kalman szűrő
+    # 3D Fizika-alapú Extended Kalman Filter
     # ------------------------------------------------------------------
 
     def _kalman_update(self, x: float, y: float, z: float, t: float) -> None:
         """
-        Frissíti a 3D Kalman szűrőt az új méréssel.
+        Frissíti a 3D Extended Kalman szűrőt az új méréssel.
+
+        EKF (Extended Kalman Filter) a konstans sebesség modell helyett:
+        - PREDICT lépés: nemlineáris fizikai egyenletek (gravitáció + drag)
+        - CORRECT lépés: hagyományos lineáris Kalman (csak pozíciót mérünk)
 
         Állapotvektor: [x, y, z, vx, vy, vz] (pozíció + sebesség mm-ben, mm/s-ban)
         Mérési vektor: [x, y, z] (csak pozíciót mérünk)
@@ -429,53 +538,87 @@ class TrajectoryPredictor:
             t:       Mérés időbélyege
         """
         if not self._kalman_initialized:
-            # Első mérés: állapot inicializálása
             self._kalman_state = np.array([x, y, z, 0.0, 0.0, 0.0], dtype=np.float64)
             self._kalman_P = np.eye(6, dtype=np.float64) * 1000.0
             self._kalman_initialized = True
             self._last_kalman_time = t
             return
 
-        # Időlépés (dt)
         dt = t - self._last_kalman_time
-        if dt <= 0 or dt > 1.0:  # Érvénytelen dt esetén kihagyjuk
+        if dt <= 0 or dt > 1.0:
             self._last_kalman_time = t
             return
         self._last_kalman_time = t
 
-        # --- Állapot-átmeneti mátrix (konstans sebesség modell) ---
-        # [x, y, z, vx, vy, vz]^T
-        F = np.eye(6, dtype=np.float64)
-        F[0, 3] = dt   # x += vx * dt
-        F[1, 4] = dt   # y += vy * dt
-        F[2, 5] = dt   # z += vz * dt
+        # --- EKF PREDICT lépés: fizikai egyenletek ---
+        px, py, pz = self._kalman_state[0:3]
+        vx, vy, vz = self._kalman_state[3:6]
+
+        v_norm = float(np.sqrt(vx**2 + vy**2 + vz**2))
+
+        # Drag gyorsulás (mm/s²): F_drag/m = -k_drag * |v| * v
+        # A drag_factor [m⁻¹] → mm egységre: kd_mm = drag_factor / 1000
+        kd_mm = self._drag_factor / 1000.0  # 1/mm egységre
+        if v_norm > 1.0:
+            drag_ax = -kd_mm * v_norm * vx
+            drag_ay = -kd_mm * v_norm * vy
+            drag_az = -kd_mm * v_norm * vz
+        else:
+            drag_ax = drag_ay = drag_az = 0.0
+
+        # Gravitáció csak Y tengelyen (lefelé negatív Y irányban)
+        g_mm = self._gravity_mm_s2  # 9810 mm/s²
+
+        # Nemlineáris állapotátmenet:
+        x_pred = np.array([
+            px + vx * dt,
+            py + vy * dt,
+            pz + vz * dt,
+            vx + drag_ax * dt,
+            vy + (-g_mm + drag_ay) * dt,
+            vz + drag_az * dt,
+        ], dtype=np.float64)
+
+        # --- EKF Jacobian: ∂f/∂state az aktuális állapotnál ---
+        # F_jac = I + dt * ∂f/∂s
+        # Pozíció egyenletek: ∂(dx/dt)/∂vx = 1 stb.
+        # Sebesség egyenletek (drag linearizálás v körül):
+        #   ∂(dvx/dt)/∂vx = -kd*(|v| + vx²/|v|)
+        #   ∂(dvx/dt)/∂vy = -kd*vx*vy/|v|
+        F_jac = np.eye(6, dtype=np.float64)
+        F_jac[0, 3] = dt
+        F_jac[1, 4] = dt
+        F_jac[2, 5] = dt
+        if v_norm > 1.0:
+            # Drag Jacobian (sebesség komponensekre)
+            v2 = v_norm
+            F_jac[3, 3] += dt * (-kd_mm * (v2 + vx**2 / v2))
+            F_jac[3, 4] += dt * (-kd_mm * vx * vy / v2)
+            F_jac[3, 5] += dt * (-kd_mm * vx * vz / v2)
+            F_jac[4, 3] += dt * (-kd_mm * vy * vx / v2)
+            F_jac[4, 4] += dt * (-kd_mm * (v2 + vy**2 / v2))
+            F_jac[4, 5] += dt * (-kd_mm * vy * vz / v2)
+            F_jac[5, 3] += dt * (-kd_mm * vz * vx / v2)
+            F_jac[5, 4] += dt * (-kd_mm * vz * vy / v2)
+            F_jac[5, 5] += dt * (-kd_mm * (v2 + vz**2 / v2))
 
         # --- Folyamatzaj mátrix ---
-        # A sebesség komponensek nagyobb zaját feltételezzük (gyorsuló labda).
-        # A q_noise * dt^2 skálázás biztosítja, hogy a sebesség becslés
-        # gyorsan alkalmazkodjon a valós mozgáshoz, függetlenül a mintavételezési rátától.
         q = self._q_noise
         dt2 = dt * dt
         Q = np.diag([
-            q * dt2,       q * dt2,       q * dt2,        # Pozíció zaj
-            q * 1e8 * dt2, q * 1e8 * dt2, q * 1e8 * dt2  # Sebesség zaj (nagy → gyors adaptáció)
+            q * dt2,       q * dt2,       q * dt2,
+            q * 1e4 * dt2, q * 1e4 * dt2, q * 1e4 * dt2,
         ])
 
-        # --- Mérési mátrix: csak pozíciót mérünk ---
+        # Kovariancia predikció (EKF: F_jac helyett F a konstans v-modellben)
+        P_pred = F_jac @ self._kalman_P @ F_jac.T + Q
+
+        # --- Mérési mátrix és zaj ---
         H = np.zeros((3, 6), dtype=np.float64)
-        H[0, 0] = 1.0  # x
-        H[1, 1] = 1.0  # y
-        H[2, 2] = 1.0  # z
+        H[0, 0] = H[1, 1] = H[2, 2] = 1.0
+        R = np.eye(3, dtype=np.float64) * self._r_noise
 
-        # --- Mérési zaj mátrix ---
-        r = self._r_noise
-        R = np.eye(3, dtype=np.float64) * r
-
-        # --- PREDICT lépés ---
-        x_pred = F @ self._kalman_state
-        P_pred = F @ self._kalman_P @ F.T + Q
-
-        # --- CORRECT lépés ---
+        # --- CORRECT lépés (standard Kalman) ---
         z_meas = np.array([x, y, z], dtype=np.float64)
         innov = z_meas - H @ x_pred
         S = H @ P_pred @ H.T + R
@@ -590,7 +733,9 @@ class TrajectoryPredictor:
         vx0, vy0, vz0 = self._kalman_state[3:6]
 
         speed = np.sqrt(vx0**2 + vy0**2 + vz0**2)
-        if speed < 150.0:  # Ha a labda sebessége kisebb mint 0.15 m/s (szinte áll), nem rajzolunk jövőbeli vonalat
+        # Jövőbeli 3D pályát CSAK AKKOR rajzolunk, ha a labda valóban mozgásban van (speed > 800 mm/s = 0.8 m/s)
+        # ÉS a kapu felé tart (vz0 < -300 mm/s). Álló labdánál vagy hátrafelé gurulva nem rajzolunk téves vonalat.
+        if speed < 800.0 or vz0 >= -300.0:
             return None
 
         MM_TO_M = 1e-3

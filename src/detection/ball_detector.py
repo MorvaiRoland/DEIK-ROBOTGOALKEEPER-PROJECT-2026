@@ -150,7 +150,7 @@ class BallDetector:
         self._left_roi = default_roi.copy()
         self._right_roi = default_roi.copy()
 
-        # ----- HSV + alak ellenőrző konfiguráció (narancssárga labda) -----
+        # ----- HSV szín-ellenőrző konfiguráció (narancssárga labda) -----
         ball_cfg = (full_config or {}).get("ball", {})
         hsv_cfg = ball_cfg.get("hsv_filter", {})
         self._hsv_enabled = bool(hsv_cfg.get("enabled", False))
@@ -160,20 +160,15 @@ class BallDetector:
         self._hsv_s_max = int(hsv_cfg.get("s_max", 255))
         self._hsv_v_min = int(hsv_cfg.get("v_min", 100))
         self._hsv_v_max = int(hsv_cfg.get("v_max", 255))
-        # min_orange_ratio: kompatibilitás a régebbi konfigurációkkal.
-        self._hsv_min_ratio = float(
-            hsv_cfg.get("min_color_ratio", hsv_cfg.get("min_orange_ratio", 0.25))
-        )
-        self._min_circularity = float(hsv_cfg.get("min_circularity", 0.20))
-        self._min_aspect_ratio = float(hsv_cfg.get("min_aspect_ratio", 0.60))
-        self._max_aspect_ratio = float(hsv_cfg.get("max_aspect_ratio", 1.55))
-        self._max_colored_blob_ratio = float(
-            hsv_cfg.get("max_colored_blob_ratio", 0.90)
-        )
+        self._hsv_min_ratio = float(hsv_cfg.get("min_color_ratio", hsv_cfg.get("min_orange_ratio", 0.08)))
+        self._min_circularity = float(hsv_cfg.get("min_circularity", 0.15))
+        self._min_aspect_ratio = float(hsv_cfg.get("min_aspect_ratio", 0.35))
+        self._max_aspect_ratio = float(hsv_cfg.get("max_aspect_ratio", 2.50))
+        self._max_colored_blob_ratio = float(hsv_cfg.get("max_colored_blob_ratio", 0.95))
 
         if self._hsv_enabled:
             logger.info(
-                "Narancssárga labda HSV/alak ellenőrző AKTÍV: H=[%d-%d], S=[%d-%d], V=[%d-%d], min_ratio=%.0f%%",
+                "HSV szín-ellenőrző AKTÍV: H=[%d-%d], S=[%d-%d], V=[%d-%d], min_ratio=%.0f%%",
                 self._hsv_h_min, self._hsv_h_max,
                 self._hsv_s_min, self._hsv_s_max,
                 self._hsv_v_min, self._hsv_v_max,
@@ -187,15 +182,6 @@ class BallDetector:
         # FPS mérés (Exponential Moving Average)
         self._det_fps: float = 0.0
         self._fps_alpha: float = 0.1
-
-        # A színalapú gyors követő csak akkor hagyja ki a drága RT-DETR
-        # inferenciát, ha mindkét sztereó képen megtalálta a labdát.
-        fast_cfg = config.get("fast_color_tracker", {})
-        self._fast_color_enabled = bool(fast_cfg.get("enabled", False)) and self._hsv_enabled
-        self._fast_color_recheck_interval = max(
-            1, int(fast_cfg.get("recheck_every_n_frames", 8))
-        )
-        self._fast_color_frames_since_model = self._fast_color_recheck_interval
 
         logger.info("BallDetector kész: modell='%s', eszköz='%s'",
                     self._model_path, self._device)
@@ -331,36 +317,11 @@ class BallDetector:
         left_proc, left_roi_offset = self._apply_roi(frame_left, is_left=True)
         right_proc, right_roi_offset = self._apply_roi(frame_right, is_left=False)
 
-        # Gyors követési út: a narancssárga, kör alakú labdát a két kamera
-        # képén egyszerre keressük. Csak kettős találatnál fogadjuk el, ezért
-        # egyetlen narancssárga háttértárgy nem tudja kiváltani az RT-DETR-t.
-        if (
-            self._fast_color_enabled
-            and self._fast_color_frames_since_model < self._fast_color_recheck_interval
-        ):
-            fast_left = self._detect_color_blob(left_proc, roi_offset=left_roi_offset)
-            fast_right = self._detect_color_blob(right_proc, roi_offset=right_roi_offset)
-            if fast_left.found and fast_right.found:
-                self._fast_color_frames_since_model += 1
-                dt = time.perf_counter() - t_start
-                instant_fps = 1.0 / max(dt, 1e-6)
-                self._det_fps = (
-                    (1.0 - self._fps_alpha) * self._det_fps
-                    + self._fps_alpha * instant_fps
-                )
-                return StereoBallDetection(
-                    left=fast_left,
-                    right=fast_right,
-                    both_found=True,
-                    det_fps=self._det_fps,
-                )
-
         # --- YOLO inferencia ---
         # model() → csak detektálás, ByteTrack nélkül (gyorsabb)
-        # Itt azonnal szükség van mindkét eredményre, ezért nem használunk
-        # stream=True generátort: a list(...) úgyis azonnal szinkronizálná.
+        # stream=True: TensorRT GPU pipeline mód – csökkenti a GPU→CPU lateónciát
         if self._tracking_enabled:
-            results = self._model.track(
+            results = list(self._model.track(
                 [left_proc, right_proc],
                 device=self._device,
                 verbose=False,
@@ -370,9 +331,10 @@ class BallDetector:
                 classes=[self._ball_class_id],
                 tracker=self._tracker_config,
                 persist=True,
-            )
+                stream=True,
+            ))
         else:
-            results = self._model(
+            results = list(self._model(
                 [left_proc, right_proc],
                 device=self._device,
                 verbose=False,
@@ -380,8 +342,8 @@ class BallDetector:
                 conf=self._confidence_threshold,
                 iou=self._iou_threshold,
                 classes=[self._ball_class_id],
-            )
-        self._fast_color_frames_since_model = 0
+                stream=True,
+            ))
 
         # --- Eredmények kinyerése (YOLO detektálás) ---
         det_left = self._extract_best_ball(
@@ -482,7 +444,7 @@ class BallDetector:
 
             # Körkörösség számítása (circularity = 4 * pi * Area / Perimeter^2)
             circularity = (4.0 * np.pi * area) / (perimeter * perimeter)
-            if circularity < self._min_circularity:
+            if circularity < 0.20:  # Megengedőbb körkörösségi küszöb levegőben szálló labdákhoz
                 continue
 
             # Bounding box méretarány (Aspect Ratio = szélesség / magasság)
@@ -490,7 +452,7 @@ class BallDetector:
             if bh <= 0:
                 continue
             aspect_ratio = bw / float(bh)
-            if not (self._min_aspect_ratio <= aspect_ratio <= self._max_aspect_ratio):
+            if not (0.35 <= aspect_ratio <= 2.50):  # Mozgáselmosódott (megnyúlt) labda engedése
                 continue
 
             # Konvex kiterjedés (Solidity = terület / konvex burok területe)
@@ -499,21 +461,20 @@ class BallDetector:
             if hull_area <= 0:
                 continue
             solidity = area / float(hull_area)
-            if solidity < 0.70:
+            if solidity < 0.55:
                 continue
 
             (x, y), radius = cv2.minEnclosingCircle(cnt)
             # Sugár szűrés leméretezve (eredeti 6.0..160.0 -> 3.0..80.0)
-            if radius < (6.0 * scale) or radius > (160.0 * scale):
+            if radius < (4.0 * scale) or radius > (180.0 * scale):
                 continue
 
             # Szaturáció átlagának kiszámítása a kontúron belül
-            # Bőrszín/fej átlaga S=70-90. A labdáé S=150-255.
             c_mask = np.zeros(mask.shape, dtype=np.uint8)
             cv2.drawContours(c_mask, [cnt], -1, 255, -1)
             mean_s = cv2.mean(hsv[:, :, 1], mask=c_mask)[0]
             
-            if mean_s < 110:
+            if mean_s < 45:
                 continue
 
             # Pontszámítás: (Körkörösség négyzete) * Tömörség * (Szaturáció aránya)
@@ -628,18 +589,9 @@ class BallDetector:
 
         # Narancssárga pixelek aránya
         total_pixels = mask.shape[0] * mask.shape[1]
-        color_pixels = int(np.count_nonzero(mask))
-        ratio = color_pixels / max(total_pixels, 1)
+        orange_pixels = int(np.count_nonzero(mask))
+        ratio = orange_pixels / max(total_pixels, 1)
 
-        width = bx2 - bx1
-        height = by2 - by1
-        aspect_ratio = width / max(float(height), 1.0)
-        if not (self._min_aspect_ratio <= aspect_ratio <= self._max_aspect_ratio):
-            return False
-
-        # Egy nagy, közel kör alakú narancssárga területet várunk. Ez kizárja például
-        # a narancssárga mez-/reklám-/ruhadarabokat akkor is, ha a modell sports ball
-        # osztályként tévesen jelöli őket.
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return False
@@ -653,10 +605,8 @@ class BallDetector:
         )
 
         logger.debug(
-            "Narancssárga HSV/alak ellenőrzés: ratio=%.1f%% (küszöb=%.0f%%), blob=%.1f%%, aspect=%.2f, circ=%.2f, box=[%d,%d,%d,%d]",
-            ratio * 100, self._hsv_min_ratio * 100, colored_blob_ratio * 100,
-            aspect_ratio, circularity,
-            bx1, by1, bx2, by2
+            "HSV ellenőrzés: orange_ratio=%.1f%% (küszöb=%.0f%%), box=[%d,%d,%d,%d]",
+            ratio * 100, self._hsv_min_ratio * 100, bx1, by1, bx2, by2
         )
 
         return (
@@ -707,10 +657,10 @@ class BallDetector:
             xyxy = boxes.xyxy[idx].cpu().numpy()
             x1, y1, x2, y2 = float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
 
-            # A narancssárga labdát MINDEN találatnál validáljuk. Nincs konfidencia
-            # alapú bypass: a magas konfidenciájú téves sports-ball találatot is
-            # ki kell zárni, ha nem narancssárga és nem körszerű.
-            if frame is not None and self._hsv_enabled:
+            # HSV szín-ellenőrzés (a ROI-vágott képen, ROI offsetelés előtt)
+            # Okos bypass: Ha a YOLO konfidenciája >= 0.20, elfogadjuk a detektálást közvetlenül,
+            # így a fekete/fehér mintázatú Kipsta labda sosem dobódik el tévesen!
+            if frame is not None and self._hsv_enabled and conf < 0.20:
                 if not self._validate_orange_color(frame, x1, y1, x2, y2):
                     logger.debug(
                         "HSV ellenőrzés BUKOTT: box=[%.0f,%.0f,%.0f,%.0f] conf=%.2f → kihagyva",

@@ -74,6 +74,7 @@ class StereoTriangulator:
         self._calibration_file = Path(
             self._stereo_cfg.get("calibration_file", "data/calibration/stereo_calibration.npz")
         )
+        self._epipolar_y_threshold = float(self._stereo_cfg.get("epipolar_y_threshold_px", 45.0))
 
         # Kamera belső paraméterek (becslések kalibrálás előtt)
         # Ezeket a kalibrálás pontosítja!
@@ -106,14 +107,16 @@ class StereoTriangulator:
         self._map2_R: Optional[np.ndarray] = None
 
         # Baseline (fallback, ha még nincs kalibrálás)
-        self._baseline_mm = float(self._geo_cfg.get("baseline_mm", 4900.0))
+        # FONTOS: A default értékek a fizikailag mért kamera-geometriát tükrözik.
+        # Baseline = 2300 mm (mérve), ne változtasd config nélkül!
+        self._baseline_mm = float(self._geo_cfg.get("baseline_mm", 2300.0))
 
         # Kalibrált-e a rendszer?
         self._is_calibrated = False
 
         # Fizikai kamera pozíciók (config-ból, fizikailag mért értékek)
-        self._left_cam_x_mm  = float(self._geo_cfg.get("left_camera_x_mm",  -1070.0))
-        self._cam_height_mm  = float(self._geo_cfg.get("camera_height_mm",   2900.0))
+        self._left_cam_x_mm  = float(self._geo_cfg.get("left_camera_x_mm",  -1150.0))
+        self._cam_height_mm  = float(self._geo_cfg.get("camera_height_mm",   2800.0))
         self._cam_z_offset_mm = float(self._geo_cfg.get("camera_z_offset_mm", -900.0))
 
     # ------------------------------------------------------------------
@@ -300,10 +303,11 @@ class StereoTriangulator:
             ).reshape(2, -1)
 
             # Epipoláris Y-illeszkedés ellenőrzése (rektifikált képeken a Y koordinátáknak kb. egyezniük kell)
+            # Szoftveres szinkron jitter (5-14 ms) és mozgás esetén a vertikális eltérés 15-35 px lehet.
             y_L_rect = pts_L[1, 0]
             y_R_rect = pts_R[1, 0]
-            if abs(y_L_rect - y_R_rect) > 150.0:  # 150 pixel feletti eltolás esetén nem ugyanaz az objektum!
-                logger.debug("triangulate: Epipoláris Y eltérés túl nagy (L_y=%.1f, R_y=%.1f)", y_L_rect, y_R_rect)
+            if abs(y_L_rect - y_R_rect) > self._epipolar_y_threshold:
+                logger.debug("triangulate: Epipoláris Y eltérés túl nagy (L_y=%.1f, R_y=%.1f, limit=%.1f)", y_L_rect, y_R_rect, self._epipolar_y_threshold)
                 return None
 
         # Háromszögelés (Hartley-Sturm lineáris módszer)
@@ -343,9 +347,21 @@ class StereoTriangulator:
         #           (kamera Y lefelé nő, kapu Y felfelé; talaj = 0)
         #   Z_goal = Z_cam + camera_z_offset_mm
         #           (kamera 900mm-rel a gólvonal mögött: Z_cam-900 → Z=0 a gólvonal)
+        # ── Kamera dőlésszög (Pitch Angle) elforgatás ────────────────────────
+        # Ha a kamerák h=280cm magasban vannak és lefelé dőlnek a pálya felé (pitch > 0),
+        # a dőlésszög elforgatásával átszámítjuk a koordinátákat a vízszintes világ-rendszerbe:
+        pitch_deg = float(self._geo_cfg.get("camera_pitch_deg", 0.0))
+        if abs(pitch_deg) > 1e-3:
+            rad = np.radians(pitch_deg)
+            y_down = Y * np.cos(rad) + Z * np.sin(rad)
+            z_fwd  = -Y * np.sin(rad) + Z * np.cos(rad)
+        else:
+            y_down = Y
+            z_fwd = Z
+
         x_goal = X + self._left_cam_x_mm            # bal kamera X offsetje
-        y_goal = self._cam_height_mm - Y            # Y megfordítása, talaj=0
-        z_goal = Z + self._cam_z_offset_mm          # Z offset: gólvonal = 0
+        y_goal = self._cam_height_mm - y_down       # Y megfordítása, talaj=0
+        z_goal = z_fwd + self._cam_z_offset_mm      # Z offset: gólvonal = 0
 
         logger.debug(
             "triangulate: cam=(%.0f, %.0f, %.0f) → goal=(%.0f, %.0f, %.0f) mm",

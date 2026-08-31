@@ -12,11 +12,11 @@
 #   Z tengely: mélység (kapu → pályára pozitív)  [mm]
 #
 # GEOMETRIA:
-#   Bal kamera:  X = -1150 mm, Y = 2800 mm, Z = 0 mm
-#   Jobb kamera: X = +1150 mm, Y = 2800 mm, Z = 0 mm
+#   Bal kamera:  X = -1100 mm, Y = 2900 mm, Z = 0 mm
+#   Jobb kamera: X = +1100 mm, Y = 2900 mm, Z = 0 mm
 #   Kapu: X = [-2000, +2000] mm, Y = [0, 2000] mm, Z = 0 mm
-#   Baseline (kamerák közötti táv): 2300 mm
-#   Lövőtávolság: Z = 10000 mm
+#   Baseline (kamerák közötti táv): 2200 mm
+#   Lövőtávolság: Z = 8000 mm
 # =============================================================================
 
 
@@ -58,12 +58,11 @@ camera:
   serial_number_left: "CACAU2546000"
   serial_number_right: "CACAU2517001"
 
-  # Alapértelmezett fehéregyensúly és elforgatás (0° = Vízszintes / Landscape)
+  # Alapértelmezett fehéregyensúly (White Balance)
   auto_white_balance: true
   wb_kr: 1.8   # Piros erősítés (ha auto_white_balance: false)
   wb_kg: 1.0   # Zöld erősítés
   wb_kb: 2.1   # Kék erősítés
-  rotation: 0  # Elforgatás fokban (0, 90, 180, 270) – Landscape mód = 0
 
   # ----- Egyedi beállítások a BAL kamerára -----
   left:
@@ -74,7 +73,6 @@ camera:
     wb_kr: 1.8
     wb_kg: 1.0
     wb_kb: 2.1
-    rotation: 0  # Landscape mód – kamerák vízszintesen szerelve
 
   # ----- Egyedi beállítások a JOBB kamerára -----
   right:
@@ -85,7 +83,6 @@ camera:
     wb_kr: 1.8
     wb_kg: 1.0
     wb_kb: 2.1
-    rotation: 0  # Landscape mód – kamerák vízszintesen szerelve
 
   # Mock kamera videófájlok (csak type="mock" esetén)
   mock:
@@ -121,22 +118,27 @@ geometry:
   principal_point_x: 968.0    # = 1936 / 2
   principal_point_y: 608.0    # = 1216 / 2
 
-  # ----- Sztereó elrendezés (fizikailag mért értékek) -----
-  # Bal kamera: kapu közepétől -1150 mm (baseline/2 = 2300/2 = 1150 mm)
-  left_camera_x_mm: -1150.0
-  # Jobb kamera: kapu közepétől +1150 mm
-  right_camera_x_mm: 1150.0
+  # ----- Szte'reó elrendezés (fizikailag mért értékek) -----
+  # Bal kamera: bal kapufától 930mm jobbra (kapu közepétől: -2000+930 = -1070mm)
+  left_camera_x_mm: -1070.0
+  # Jobb kamera: jobb kapufától 930mm balra (kapu közepétől: +2000-930 = +1070mm)
+  right_camera_x_mm: 1070.0
 
-  # Baseline = a két kamera közötti vízszintes távolság (mérve: 230 cm)
-  baseline_mm: 2300.0
+  # Baseline = a két kamera közötti vízszintes távolság
+  # baseline = 1070 + 1070 = 2140 mm (mérve: ~2238mm, valószínű pontossági eltérés)
+  baseline_mm: 2140.0
 
-  # Kamerák magassága a talajtól (mérve: 280 cm)
-  camera_height_mm: 2800.0
+  # Kamerák magassága a talajthatól
+  camera_height_mm: 2900.0
 
   # Kamerák Z pozíciója (kapu síkjától mért távolság)
   # Negatív: gólvonal mögött (azaz a kapu belsejében), +Z a pálya felé mutat
   # A kamerák 900mm-rel vannak a gólvonal mögött
   camera_z_offset_mm: -900.0
+
+  # Kamerák lefelé dőlési szöge fokban (Pitch angle)
+  # 0.0° = vízszintesen előre néznek. Ha a kamerák h=280cm magasan vannak és a pálya felé néznek pl 35-45°-ban.
+  camera_pitch_deg: 40
 
   # ----- Kapu mérete -----
   goal_width_mm: 4000.0       # 4 méter széles
@@ -144,7 +146,7 @@ geometry:
 
   # ----- Pálya -----
   # A lövő helye (ahol a labdát rúgják)
-  shooting_distance_mm: 10000.0  # 10 méter a kaputól
+  shooting_distance_mm: 8000.0  # 8 méter a kaputól
 
 
 # =============================================================================
@@ -185,23 +187,19 @@ ball:
   # Gömb légellenállási koefficiense (dimenzió nélküli)
   drag_coefficient: 0.47
 
-  # ----- HSV + alak ellenőrző (narancssárga labda) -----
-  # OpenCV HSV-ben a narancssárga labda jellemzően H=5..25. A szigorú validáció
-  # minden RT-DETR találatra lefut, ezért más „sports ball” objektum nem kap
-  # zöld jelölést, ha nem megfelelően narancssárga és közel kör alakú.
+  # ----- HSV szín-ellenőrző (narancssárga Kipsta labda) -----
+  # Finomhangolva a fehér mintás Kipsta labdához:
+  # s_min=75 és min_orange_ratio=0.08 (8%) úgy lett beállítva, hogy a labdán lévő
+  # fehér feliratok ("KIPSTA") és grafikák se okozzanak elutasítást!
   hsv_filter:
     enabled: true
     h_min: 5       # Narancssárga hue alsó határ (OpenCV: 0-180)
     h_max: 25      # Narancssárga hue felső határ
-    s_min: 110     # A szürke/fehér tárgyak kizárása
+    s_min: 75      # Finomhangolt szaturáció (átengedi a fehér mintás labdát is)
     s_max: 255
-    v_min: 100     # Sötét háttér és árnyék kizárása
+    v_min: 60      # Minimum világosság
     v_max: 255
-    min_color_ratio: 0.20       # A detektált doboz legalább 20%-a legyen narancssárga
-    min_circularity: 0.55       # Mozgáselmosódást még engedő köralakúság
-    min_aspect_ratio: 0.60      # BBox szélesség / magasság
-    max_aspect_ratio: 1.55
-    max_colored_blob_ratio: 0.90  # Teli narancssárga négyzet/tábla kizárása
+    min_orange_ratio: 0.08   # A labda területének legalább 8%-a narancssárga legyen
 
 
 # =============================================================================
@@ -209,19 +207,20 @@ ball:
 # =============================================================================
 detection:
   # ----- Modell Választás -----
-  # "models/rtdetr-l.engine" → RT-DETR Large TensorRT GPU motor
-  model_path: "models/rtdetr-l.engine"
+  # "models/rtdetr-l.engine" → Real-Time Detection Transformer (RT-DETR) TensorRT batch=2 GPU modell
+  model_path: "models/yolov8n.engine"
 
   # COCO modell osztály ID: 32 (sports ball)
   ball_class_id: 32
 
   # Detektálási megbízhatósági küszöb (0.0 – 1.0)
-  confidence_threshold: 0.20
+  # 0.15: Érzékeny beállítás, hogy a levegőben lévő 15-20%-os konfidenciájú labdákat is felismerje!
+  confidence_threshold: 0.15
 
-  # IoU küszöb NMS-hez
+  # IoU küszöb NMS-hez (Non-Maximum Suppression) – YOLOv10 ezt belülről kezeli
   iou_threshold: 0.45
 
-  # Inferencia bemeneti méret
+  # Inferencia bemeneti méret (kisebb → gyorsabb, RTX 3050-en batch=2-vel >100 FPS)
   input_size: 640
 
   # Inferencia eszköz: "cuda:0" = GPU (RTX 3050), "cpu" = processzor
@@ -235,13 +234,6 @@ detection:
     tracker_config: "bytetrack.yaml"
     max_lost_frames: 15
 
-  # Gyors pálya: a két kamerán talált, szigorúan narancssárga és kör alakú
-  # objektumot közvetlenül követjük. Minden 8. képen RT-DETR újraellenőriz,
-  # illetve azonnal visszaesünk rá, ha csak az egyik kamerán van találat.
-  fast_color_tracker:
-    enabled: true
-    recheck_every_n_frames: 8
-
   # ----- Kalman szűrő (2D per-camera simítás) -----
   kalman:
     enabled: true
@@ -254,8 +246,6 @@ detection:
     # Ennyi frame nélküli detektálás után nullázzuk a szűrőt
     # 5: gyorsabb újradetektálás elvesztett labda esetén
     max_coast_frames: 5
-    # A zöld jelölés legfeljebb ennyivel vetíthető előre a GUI képre.
-    display_prediction_horizon_s: 0.15
 
   # ----- Region of Interest (ROI) -----
   # Opcionális kép-terület szűrés. A kapus rendszernél kikapcsolva (enabled: false),

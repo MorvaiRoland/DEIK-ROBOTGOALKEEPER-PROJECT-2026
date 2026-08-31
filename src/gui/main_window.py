@@ -51,7 +51,9 @@ from PyQt6.QtWidgets import (
 from camera.camera_manager import CameraManager, StereoPair
 from detection.ball_detector import BallDetection, BallDetector, StereoBallDetection
 from detection.kalman_tracker import KalmanTracker2D
+from detection.optical_flow_tracker import OpticalFlowTracker
 from stereo.triangulator import StereoTriangulator
+from stereo.mono_depth_estimator import MonoDepthEstimator
 from prediction.trajectory_predictor import TrajectoryPredictor, ImpactPrediction
 from gui.goal_view import GoalViewWidget
 from gui.calibration_dialog import CalibrationDialog
@@ -459,21 +461,79 @@ class DetectionWorker(threading.Thread):
             )
             triangulator.load_calibration(cal_file)
 
+            # --- Optikai flow tracker-ek (per-kamera) ---
+            of_cfg = self._config.get("optical_flow", {})
+            of_left = OpticalFlowTracker(of_cfg)
+            of_right = OpticalFlowTracker(of_cfg)
+
+            # --- Mono mélység becslő ---
+            mono_est = MonoDepthEstimator(self._config)
+            # Ha a kamerakábráció elérhető, frissítjük a fókuszivált sávot
+            if triangulator.is_calibrated:
+                try:
+                    fx = float(triangulator._P1[0, 0]) if hasattr(triangulator, '_P1') else None
+                    if fx and fx > 100:
+                        mono_est.update_focal_length(fx)
+                except Exception:
+                    pass
+
             with self._detector_lock:
                 self._detector = detector
                 for is_left, roi in self._roi_settings.items():
                     detector.set_roi(is_left, **roi)
 
-            logger.info("Detektáló szál elindult (latest-frame üzemmód)")
+            logger.info("Detektáló szál elindult (latest-frame üzemmód + OF + MonoZ)")
             while self._running.is_set():
                 snapshot = self._frame_exchange.wait_for_newer(last_sequence)
                 if snapshot is None:
                     break
                 last_sequence = snapshot.sequence
 
+                # Szürke képek az optikai flow-hoz
+                gray_left = cv2.cvtColor(snapshot.left_image, cv2.COLOR_BGR2GRAY)
+                gray_right = cv2.cvtColor(snapshot.right_image, cv2.COLOR_BGR2GRAY)
+
                 # The lock also makes live ROI updates safe while Ultralytics is running.
                 with self._detector_lock:
                     detection = detector.detect(snapshot.left_image, snapshot.right_image)
+
+                # --- Optikai flow fallback: ha a YOLO nem talált labbát ---
+                if detection.left.found:
+                    of_left.update_from_yolo(
+                        gray_left,
+                        detection.left.x, detection.left.y, detection.left.radius
+                    )
+                else:
+                    of_result_left = of_left.track(gray_left)
+                    if of_result_left is not None:
+                        ox, oy = of_result_left
+                        r = detection.left.radius if detection.left.radius > 0 else 15.0
+                        detection.left = BallDetection(
+                            found=True, x=ox, y=oy, radius=r,
+                            confidence=0.55,  # optical flow konfidencia
+                            timestamp=snapshot.timestamp,
+                        )
+
+                if detection.right.found:
+                    of_right.update_from_yolo(
+                        gray_right,
+                        detection.right.x, detection.right.y, detection.right.radius
+                    )
+                else:
+                    of_result_right = of_right.track(gray_right)
+                    if of_result_right is not None:
+                        ox, oy = of_result_right
+                        r = detection.right.radius if detection.right.radius > 0 else 15.0
+                        detection.right = BallDetection(
+                            found=True, x=ox, y=oy, radius=r,
+                            confidence=0.55,
+                            timestamp=snapshot.timestamp,
+                        )
+
+                # Reset optical flow ha mindkt kámera elbukik
+                if not detection.left.found and not detection.right.found:
+                    of_left.reset()
+                    of_right.reset()
 
                 with self._kalman_lock:
                     left_det, left_valid, left_x, left_y = self._filter_detection(
@@ -498,6 +558,40 @@ class DetectionWorker(threading.Thread):
                     pos_3d = triangulator.triangulate(
                         left_point=(left_x, left_y), right_point=(right_x, right_y)
                     )
+
+                # --- Mono mélység validáció és fuzízió ---
+                if pos_3d is not None and detection.left.radius > 0:
+                    z_fused, z_valid, z_warn = mono_est.validate_and_fuse_stereo_z(
+                        float(pos_3d[2]), detection.left.radius
+                    )
+                    if z_warn:
+                        logger.warning("MonoZ: %s", z_warn)
+                    pos_3d[2] = z_fused
+                elif pos_3d is None and left_valid and detection.left.radius > 0:
+                    # Szoftveres szinkron jitter vagy egykamerás takarás esetén: Mono mélység tartalék
+                    z_fallback = mono_est.fallback_z(detection.left.radius)
+                    if z_fallback is not None:
+                        pitch_deg = float(self._config.get("geometry", {}).get("camera_pitch_deg", 0.0))
+                        rad = np.radians(pitch_deg)
+                        f_px = float(mono_est.focal_length_px)
+                        cx = float(self._config.get("geometry", {}).get("principal_point_x", 968.0))
+                        cy = float(self._config.get("geometry", {}).get("principal_point_y", 608.0))
+                        cam_height = float(self._config.get("geometry", {}).get("camera_height_mm", 2800.0))
+                        left_cam_x = float(self._config.get("geometry", {}).get("left_camera_x_mm", -1150.0))
+                        cam_z_offset = float(self._config.get("geometry", {}).get("camera_z_offset_mm", -900.0))
+
+                        X_cam = (left_x - cx) * z_fallback / max(f_px, 1.0)
+                        Y_cam = (left_y - cy) * z_fallback / max(f_px, 1.0)
+
+                        y_down = Y_cam * np.cos(rad) + z_fallback * np.sin(rad)
+                        z_fwd  = -Y_cam * np.sin(rad) + z_fallback * np.cos(rad)
+
+                        pos_3d = np.array([
+                            X_cam + left_cam_x,
+                            cam_height - y_down,
+                            z_fwd + cam_z_offset
+                        ], dtype=np.float64)
+                        logger.debug("MonoZ 3D tartalék aktiválva: Z=%.0f mm", pos_3d[2])
 
                 if pos_3d is not None:
                     predictor.add_measurement(
