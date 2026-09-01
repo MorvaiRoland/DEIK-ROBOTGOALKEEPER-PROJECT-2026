@@ -16,7 +16,7 @@
 #   Jobb kamera: X = +1100 mm, Y = 2900 mm, Z = 0 mm
 #   Kapu: X = [-2000, +2000] mm, Y = [0, 2000] mm, Z = 0 mm
 #   Baseline (kamerák közötti táv): 2200 mm
-#   Lövőtávolság: Z = 8000 mm
+#   Lövőtávolság: Z = 10000 mm
 # =============================================================================
 
 
@@ -124,9 +124,8 @@ geometry:
   # Jobb kamera: jobb kapufától 930mm balra (kapu közepétől: +2000-930 = +1070mm)
   right_camera_x_mm: 1070.0
 
-  # Baseline = a két kamera közötti vízszintes távolság
-  # baseline = 1070 + 1070 = 2140 mm (mérve: ~2238mm, valószínű pontossági eltérés)
-  baseline_mm: 2140.0
+  # Baseline = a két kamera közötti távolság (a stereo_calibration.npz alapján: 2369.4 mm)
+  baseline_mm: 2369.4
 
   # Kamerák magassága a talajthatól
   camera_height_mm: 2900.0
@@ -146,7 +145,7 @@ geometry:
 
   # ----- Pálya -----
   # A lövő helye (ahol a labdát rúgják)
-  shooting_distance_mm: 8000.0  # 8 méter a kaputól
+  shooting_distance_mm: 10000.0  # 10 méter a kaputól
 
 
 # =============================================================================

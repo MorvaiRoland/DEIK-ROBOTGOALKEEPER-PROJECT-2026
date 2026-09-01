@@ -41,19 +41,22 @@ A **DEIK Robot Foci Kapus** egy valós idejű, nagy sebességű optikai labdakö
 
 ### 🛠 Hardver és Geometriai Specifikációk
 
-| Komponens / Paraméter | Érték / Leírás |
+A rendszer a `config/config.yaml` fájlban finomhangolt aktív beállításokkal működik:
+
+| Komponens / Paraméter | Aktuális Specifikáció & Beállítás |
 |---|---|
-| **Kamerák** | 2× Ximea MC023CG-SY-UB (USB 3.0) |
-| **Szenzor** | Sony IMX174 CMOS, Global Shutter, 2.3 MP |
-| **Felbontás & FPS** | Natív: 1936 × 1216 @ 100 FPS (max 165 FPS) |
-| **Lencsék** | Fujifilm CF8ZA-1S (8 mm, C-Mount, f/1.8 – f/4.0) |
-| **Pixeltávolság / Fókusz** | 5.86 µm pixelméret, $f_{px} \approx 1365.2 \text{ px}$ |
-| **Kamera Pozíciók** | Bal: $X = -1070\text{ mm}$, Jobb: $X = +1070\text{ mm}$, Magasság: $Y = 2900\text{ mm}$ |
-| **Baseline (Kameratáv)** | $\approx 2140\text{ mm}$ – $2238\text{ mm}$ |
-| **Kapu Mérete** | $4000\text{ mm} \times 2000\text{ mm}$ ($X \in [-2000, 2000]$, $Y \in [0, 2000]$) |
-| **Lövő Távolság** | $Z = 8000\text{ mm}$ (8 méter a kapu síkjától) |
-| **Labda** | 4-es / 5-ös méretű focilabda ($\approx 210-220\text{ mm}$ átmérő, $\approx 340-430\text{ g}$) |
-| **Inferencia GPU** | NVIDIA GeForce RTX 3050 6GB (TensorRT CUDA) |
+| **Kamera** | **Ximea MC023CG-SY-UB × 2** (USB 3.0) |
+| **Szenzor** | **Sony IMX174**, Global Shutter, 2.3 MP |
+| **Felbontás & FPS** | Natív: 1936 × 1216 (Max: **165 FPS**, Cél / Target: **100 FPS**) |
+| **Lencse** | **Fujifilm CF8ZA-1S**, 8mm, f/1.8 – f/4.0, C-Mount |
+| **Fókusztávolság (px)** | **~1365.2 px** (5.86 µm pixelmérettel) |
+| **Csatlakozás** | **EP-USB3HybridcableU-20** (20m hibrid kábel, USB 3.0) |
+| **GPU** | **NVIDIA RTX 3050 6GB** (TensorRT CUDA inferencia) |
+| **Kamera Elrendezés** | Bal: $X = -1070\text{ mm}$, Jobb: $X = +1070\text{ mm}$, Magasság: $Y = 2900\text{ mm}$, Z-offset: $-900\text{ mm}$ (Pitch: 40°) |
+| **Baseline (Kameratáv)** | **2369.4 mm** *(a `stereo_calibration.npz` kalibráció alapján)* |
+| **Kapu Mérete** | **4000 mm × 2000 mm** ($X \in [-2000, +2000]\text{ mm}$, $Y \in [0, 2000]\text{ mm}$) |
+| **Lövőtávolság** | **10000 mm** (10 méter a kapu síkjától) |
+| **Labda** | **Kipsta 4-es / 5-ös méret** (4-es: 210 mm átmérő, 340 g / 5-ös: 220 mm átmérő, 430 g) |
 
 ---
 
@@ -270,19 +273,22 @@ The **DEIK Robot Goalkeeper** project is a high-speed real-time optical ball det
 
 ### 🛠 Hardware & Geometry Specifications
 
-| Parameter / Component | Value / Description |
+Active specifications based on `config/config.yaml`:
+
+| Component / Parameter | Active Specification & Setting |
 |---|---|
-| **Cameras** | 2× Ximea MC023CG-SY-UB (USB 3.0) |
-| **Sensor** | Sony IMX174 CMOS, Global Shutter, 2.3 MP |
-| **Resolution & FPS** | Native: 1936 × 1216 @ 100 FPS (up to 165 FPS max) |
-| **Lenses** | Fujifilm CF8ZA-1S (8 mm, C-Mount, f/1.8 – f/4.0) |
-| **Pixel Pitch / Focal** | 5.86 µm pixel size, $f_{px} \approx 1365.2 \text{ px}$ |
-| **Camera Positions** | Left: $X = -1070\text{ mm}$, Right: $X = +1070\text{ mm}$, Height: $Y = 2900\text{ mm}$ |
-| **Baseline Distance** | $\approx 2140\text{ mm}$ – $2238\text{ mm}$ |
-| **Goal Dimensions** | $4000\text{ mm} \times 2000\text{ mm}$ ($X \in [-2000, 2000]$, $Y \in [0, 2000]$) |
-| **Shooting Distance** | $Z = 8000\text{ mm}$ (8 meters from goal line) |
-| **Football Target** | Size 4 / Size 5 ball ($\approx 210-220\text{ mm}$ diameter, $\approx 340-430\text{ g}$) |
-| **Inference Hardware** | NVIDIA GeForce RTX 3050 6GB (TensorRT CUDA) |
+| **Camera** | **Ximea MC023CG-SY-UB × 2** (USB 3.0) |
+| **Sensor** | **Sony IMX174**, Global Shutter, 2.3 MP |
+| **Max FPS** | Native: 1936 × 1216 (Max: **165 FPS**, Target: **100 FPS**) |
+| **Lens** | **Fujifilm CF8ZA-1S**, 8mm, f/1.8 – f/4.0, C-Mount |
+| **Focal Length (px)** | **~1365.2 px** (5.86 µm pixel size) |
+| **Connection** | **EP-USB3HybridcableU-20** (20m hybrid cable, USB 3.0) |
+| **GPU** | **NVIDIA RTX 3050 6GB** (TensorRT CUDA acceleration) |
+| **Camera Layout** | Left: $X = -1070\text{ mm}$, Right: $X = +1070\text{ mm}$, Height: $Y = 2900\text{ mm}$, Z-offset: $-900\text{ mm}$ (Pitch: 40°) |
+| **Baseline** | **2369.4 mm** *(calibrated value from `stereo_calibration.npz`)* |
+| **Goal Dimensions** | **4000 mm × 2000 mm** ($X \in [-2000, +2000]\text{ mm}$, $Y \in [0, 2000]\text{ mm}$) |
+| **Shooting Distance** | **10000 mm** (10 meters from goal plane) |
+| **Ball Target** | **Kipsta Size 4 / Size 5** (Size 4: 210 mm diameter, 340 g / Size 5: 220 mm diameter, 430 g) |
 
 ---
 
