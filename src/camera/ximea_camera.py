@@ -10,16 +10,24 @@ Főbb funkciók:
     - Ring buffer az alacsony latenciájú frame-hozzáféréshez
     - USB3 sávszélesség menedzsment (két kamera párhuzamos kezelése)
     - Automatikus újracsatlakozás kiesés esetén
+    - Hardveres MASTER/SLAVE GPIO szinkronizáció (CBL-702-8P-SYNC-5M0 kábel)
 
 Hardver:
     - Kamera: Ximea MC023CG-SY-UB
     - Szenzor: Sony IMX174 (Global Shutter, 2.3 MP)
     - Max FPS: 165 (teljes 1936×1216 felbontáson)
     - Csatlakozás: USB3 (EP-USB3HybridcableU-20 kábel)
+    - Szinkron kábel: CBL-702-8P-SYNC-5M0 (M9, 8 pólusú)
+
+Hardveres szinkron bekötés (CBL-702-8P-SYNC-5M0):
+    MASTER kábel Pin 3 (Zöld/OUT1)     → SLAVE kábel Pin 5 (Szürke/IN1)
+    MASTER kábel Pin 4 (Sárga/OUT-GND) → SLAVE kábel Pin 6 (Rózsaszín/IN-GND)
+    MASTER kábel Pin 7 (Kék/GND)       → SLAVE kábel Pin 7 (Kék/GND)
 
 Hivatkozások:
     - Ximea xiAPI doku: https://www.ximea.com/support/wiki/apis/Python
     - SDK telepítés: https://www.ximea.com/support/wiki/apis/XIMEA_Linux_Software_Package
+    - GPIO szinkron: https://www.ximea.com/support/wiki/apis/Trigger_and_synchronization
 """
 
 import logging
@@ -62,11 +70,18 @@ _MAX_OPEN_RETRIES = 3
 # Próbálkozások közötti várakozási idő (másodperc)
 _RETRY_DELAY_SEC = 1.0
 
-# Maximális várakozás frame olvasásnál (másodperc)
+# Maximális várakozás frame olvasásnál (másodperc) – MASTER módban
 _FRAME_TIMEOUT_SEC = 2.0
+
+# Maximális várakozás frame olvasásnál SLAVE módban (ms) – várja a trigger jelet
+# Ha 5000 ms alatt nem kap triggert, az SDK hibát dob (kábel nincs bekötve?)
+_SLAVE_FRAME_TIMEOUT_MS = 5000
 
 # Kamera hőmérsékleti riasztási küszöb (Celsius)
 _TEMPERATURE_WARNING_THRESHOLD = 60.0
+
+# Érvényes sync szerepek
+_SYNC_ROLES = {"master", "slave", None}
 
 
 class XimeaCamera(BaseCamera):
@@ -96,6 +111,8 @@ class XimeaCamera(BaseCamera):
         is_left: bool,
         config: dict,
         serial_number: Optional[str] = None,
+        sync_role: Optional[str] = None,
+        sync_config: Optional[dict] = None,
     ):
         """
         Args:
@@ -103,6 +120,10 @@ class XimeaCamera(BaseCamera):
             is_left:       True = bal oldali (negatív X), False = jobb oldali (pozitív X)
             config:        A system_config.yaml "camera" szekciója
             serial_number: Ha megadott, sorozatszám alapján nyitjuk meg (ajánlott)
+            sync_role:     Szinkronizáció szerepe: "master" | "slave" | None (szoftver szinkron)
+                           MASTER: GPIO OUT1-en adja ki az expozíciós trigger pulzust
+                           SLAVE:  GPIO IN1-en várja a trigger jelet a MASTER-től
+            sync_config:   A config.yaml "camera.sync" szekciója (GPIO pin beállítások)
         """
         if not XIMEA_AVAILABLE:
             raise RuntimeError(
@@ -149,6 +170,27 @@ class XimeaCamera(BaseCamera):
         self._flip_h = bool(config.get("flip_h", False))
         self._flip_v = bool(config.get("flip_v", False))
         self._rotation = int(config.get("rotation", 0))  # Landscape mód alapból
+
+        # --- Hardveres GPIO szinkronizáció ---
+        if sync_role not in _SYNC_ROLES:
+            raise ValueError(
+                f"Ismeretlen sync_role: {sync_role!r}; "
+                "'master', 'slave' vagy None lehet."
+            )
+        self._sync_role: Optional[str] = sync_role  # "master" | "slave" | None
+        self._sync_config: dict = sync_config or {}
+        # Ha SLAVE, hosszabb timeout-ot használunk (trigger jelet vár a MASTER-től)
+        self._frame_timeout_ms: int = (
+            _SLAVE_FRAME_TIMEOUT_MS if sync_role == "slave" else 1000
+        )
+        # Fallback flag: ha a SLAVE nem kap triggert, visszaesünk szoftver szinkronra
+        self._sync_fallback_active: bool = False
+
+        if sync_role:
+            logger.info(
+                "XimeaCamera sync szerepe: %s (%s)",
+                sync_role.upper(), cam_info.name
+            )
 
 
         # Ximea SDK objektumok
@@ -279,6 +321,10 @@ class XimeaCamera(BaseCamera):
         """
         Beállítja a kamera paramétereit a konfig alapján.
         A megnyitás után hívódik meg, az acqusition megkezdése előtt.
+
+        Szinkronizáció:
+            MASTER: GPO OUT1 → XI_GPO_EXPOSURE_ACTIVE (pulzus az expozíció alatt)
+            SLAVE:  GPI IN1  → XI_GPI_TRIGGER + XI_TRG_EDGE_RISING (emelkedő élre triggerel)
         """
         if self._cam is None:
             return
@@ -313,14 +359,21 @@ class XimeaCamera(BaseCamera):
         except Exception as exc:
             logger.warning("  USB sávszélesség beállítási hiba: %s", exc)
 
-        # --- Frame rate ---
-        try:
-            # MC kameracsaládhoz a xiAPI FRAME_RATE_LIMIT módot ajánl.
-            self._cam.set_acq_timing_mode("XI_ACQ_TIMING_MODE_FRAME_RATE_LIMIT")
-            self._cam.set_framerate(self._target_fps)
-            logger.info("  Cél frame rate: %.1f FPS", self._target_fps)
-        except Exception as exc:
-            logger.warning("  Frame rate beállítási hiba: %s", exc)
+        # --- Frame rate (csak MASTER és szoftver-szinkron módban) ---
+        # SLAVE módban a frame rate-et a MASTER trigger jele határozza meg,
+        # ezért frame rate limitet nem állítunk be.
+        if self._sync_role != "slave":
+            try:
+                self._cam.set_acq_timing_mode("XI_ACQ_TIMING_MODE_FRAME_RATE_LIMIT")
+                self._cam.set_framerate(self._target_fps)
+                logger.info("  Cél frame rate: %.1f FPS", self._target_fps)
+            except Exception as exc:
+                logger.warning("  Frame rate beállítási hiba: %s", exc)
+        else:
+            logger.info(
+                "  Frame rate: SLAVE módban a MASTER trigger határozza meg "
+                "(%.1f FPS várható)", self._target_fps
+            )
 
         # A tényleges SDK-értékek naplózása teszteléshez. Ezek mutatják meg,
         # hogy a kábel/port valóban SuperSpeed-en és elegendő sávszélességgel fut-e.
@@ -355,14 +408,167 @@ class XimeaCamera(BaseCamera):
         except Exception as exc:
             logger.warning("  Fehéregyensúly beállítási hiba: %s", exc)
 
-        # --- Akvizíciós puffer méret növelése (nagy FPS-hez) ---
-        # Alapértelmezett 70 MB → 256 MB (csökkenti az eldobott frame-eket)
+        # --- Akvizíciós puffer optimalizálás (XIMEA dokumentáció alapján) ---
+        # Forrás: https://www.ximea.com/support/wiki/usb3/How_to_optimize_software_performance_on_high_frame_rates
+        #
+        # Nagy FPS-hez (100 FPS, 1936×1216, RGB24 ≈ 6.8 MB/frame) két dolog kell:
+        # 1. ACQ_TRANSPORT_BUFFER_SIZE → payload méretéhez igazítva (ne legyen feleslegesen nagy)
+        # 2. BUFFERS_QUEUE_SIZE → maximumra állítva (minél több puffer, annál kevesebb eldobott frame)
         try:
-            self._cam.set_acq_buffer_size(256)
-        except Exception:
-            pass  # Régebbi SDK verziókban nem elérhető
+            # 1. Payload méret lekérdezése
+            payload = self._cam.get_image_payload_size()
+
+            # 2. Transport puffer méret lekérdezése és optimalizálása
+            transport_default = self._cam.get_acq_transport_buffer_size()
+            try:
+                transport_increment = self._cam.get_acq_transport_buffer_size_increment()
+            except Exception:
+                transport_increment = 0
+            try:
+                transport_minimum = self._cam.get_acq_transport_buffer_size_minimum()
+            except Exception:
+                transport_minimum = 0
+
+            # Ha a payload kisebb mint az alapértelmezett transport puffer,
+            # érdemes a transport puffert a payload-hoz igazítani
+            if transport_default > 0 and payload < transport_default + max(transport_increment, 1):
+                transport_size = payload
+                if transport_increment > 0:
+                    remainder = transport_size % transport_increment
+                    if remainder:
+                        transport_size += transport_increment - remainder
+                if transport_minimum > 0 and transport_size < transport_minimum:
+                    transport_size = transport_minimum
+                try:
+                    self._cam.set_acq_transport_buffer_size(transport_size)
+                    logger.info(
+                        "  Transport puffer: %d byte (payload=%d, alap=%d)",
+                        transport_size, payload, transport_default
+                    )
+                except Exception as exc:
+                    logger.debug("  Transport puffer beállítás nem sikerült: %s", exc)
+            else:
+                logger.debug("  Transport puffer: alapértelmezett (%d byte)", transport_default)
+
+            # 3. Queue puffer szám maximalizálása
+            try:
+                max_queue = self._cam.get_buffers_queue_size_maximum()
+                if max_queue and max_queue > 0:
+                    self._cam.set_buffers_queue_size(max_queue)
+                    logger.info(
+                        "  Queue puffer szám: %d (maximum) → kevesebb eldobott frame 100 FPS-nél",
+                        max_queue
+                    )
+            except Exception as exc:
+                # Fallback: ha nem sikerül lekérdezni a maximumot, 32-t állítunk be
+                try:
+                    self._cam.set_buffers_queue_size(32)
+                    logger.info("  Queue puffer szám: 32 (fallback)")
+                except Exception:
+                    pass
+                logger.debug("  Queue puffer maximum lekérdezés nem sikerült: %s", exc)
+
+        except Exception as exc:
+            logger.warning("  Puffer optimalizálás részben sikertelen: %s", exc)
+
+
+        # ================================================================
+        # Hardveres GPIO szinkronizáció konfigurálása
+        # ================================================================
+        # A MASTER expozíció ELEJÉN az OUT1 (Pin 3, Zöld) kimenet HIGH lesz.
+        # Ez az optó-izolált jel a kábelen keresztül a SLAVE IN1 (Pin 5, Szürke)
+        # bemenetére kerül, ahol az emelkedő él (RISING EDGE) triggeri a SLAVE
+        # kamera expozícióját. Eredmény: <10 µs szinkron jitter.
+        if self._sync_role == "master":
+            self._configure_gpio_master()
+        elif self._sync_role == "slave":
+            self._configure_gpio_slave()
 
         logger.debug("  Kamera konfiguráció kész: %s", self._info.name)
+
+    def _configure_gpio_master(self) -> None:
+        """
+        MASTER kamera GPIO kimenet konfigurálása.
+
+        - Nem izolált mód (XI_GPO_PORT2): Pin 8 (Piros / INOUT1) 3.3V LVTTL kimenet
+        - Opto-izolált mód (XI_GPO_PORT1): Pin 3 (Zöld / OUT1) Open Collector kimenet
+        """
+        if self._cam is None:
+            return
+
+        gpo_selector = self._sync_config.get("gpo_selector", "XI_GPO_PORT2")
+        gpo_mode = self._sync_config.get("gpo_mode", "XI_GPO_EXPOSURE_ACTIVE")
+
+        try:
+            self._cam.set_gpo_selector(gpo_selector)
+            self._cam.set_gpo_mode(gpo_mode)
+            pin_desc = (
+                "Pin 8 (Piros/INOUT1 nem izolált)" if gpo_selector == "XI_GPO_PORT2"
+                else "Pin 3 (Zöld/OUT1 opto-izolált)"
+            )
+            logger.info(
+                "  [MASTER] GPIO kimenet beállítva: %s → %s | "
+                "Kábel %s adja a trigger pulzust a SLAVE-nek.",
+                gpo_selector, gpo_mode, pin_desc
+            )
+        except Exception as exc:
+            logger.error(
+                "  [MASTER] GPIO kimenet beállítási HIBA (%s → %s): %s "
+                "| Ellenőrizd a kábel csatlakozását!",
+                gpo_selector, gpo_mode, exc
+            )
+
+    def _configure_gpio_slave(self) -> None:
+        """
+        SLAVE kamera GPIO bemenet és trigger konfigurálása.
+
+        - Nem izolált mód (XI_GPI_PORT2): Pin 8 (Piros / INOUT1) 3.3V LVTTL bemenet
+        - Opto-izolált mód (XI_GPI_PORT1): Pin 5 (Szürke / IN1) opto-izolált bemenet
+        """
+        if self._cam is None:
+            return
+
+        gpi_selector = self._sync_config.get("gpi_selector", "XI_GPI_PORT2")
+        gpi_mode = self._sync_config.get("gpi_mode", "XI_GPI_TRIGGER")
+        trigger_source = self._sync_config.get("trigger_source", "XI_TRG_EDGE_RISING")
+
+        try:
+            # 1. GPI port kiválasztása és trigger módba állítása
+            self._cam.set_gpi_selector(gpi_selector)
+            self._cam.set_gpi_mode(gpi_mode)
+            pin_desc = (
+                "Pin 8 (Piros/INOUT1 nem izolált)" if gpi_selector == "XI_GPI_PORT2"
+                else "Pin 5 (Szürke/IN1 opto-izolált)"
+            )
+            logger.info(
+                "  [SLAVE] GPIO bemenet beállítva: %s → %s | "
+                "Kábel %s fogadja a MASTER trigger pulzusát.",
+                gpi_selector, gpi_mode, pin_desc
+            )
+
+            # 2. Bidirekcionális pin (Pin 8 / PORT2) esetén a SLAVE kimeneti meghajtóját
+            # High Impedance (XI_GPO_OFF) állapotba állítjuk, hogy bemenetként működjön!
+            if gpi_selector == "XI_GPI_PORT2":
+                try:
+                    self._cam.set_gpo_selector("XI_GPO_PORT2")
+                    self._cam.set_gpo_mode("XI_GPO_OFF")
+                    logger.info("  [SLAVE] PORT2 (Pin 8 INOUT1) kimenet kikapcsolva: XI_GPO_OFF (High Impedance / bemenet)")
+                except Exception as exc:
+                    logger.debug("  [SLAVE] GPO OFF beállítás nem sikerült (elmaradhat): %s", exc)
+
+            # 3. Trigger forrás: külső jel emelkedő élére
+            self._cam.set_trigger_source(trigger_source)
+            logger.info(
+                "  [SLAVE] Trigger forrás: %s (MASTER expozíció kezdetén triggerel)",
+                trigger_source
+            )
+
+        except Exception as exc:
+            logger.error(
+                "  [SLAVE] GPIO trigger beállítási HIBA (%s/%s/%s): %s "
+                "| Ellenőrizd a kábel csatlakozását!",
+                gpi_selector, gpi_mode, trigger_source, exc
+            )
 
     # ------------------------------------------------------------------
     # Frame olvasás
@@ -483,17 +689,31 @@ class XimeaCamera(BaseCamera):
         Ez a metódus a háttérben fut és folyamatosan tölti a ring buffert
         a kamerából érkező frame-ekkel. A fő szál (read() hívója) soha
         nem blokkolódik egy frame megszerzéséig.
+
+        SLAVE módban:
+            A get_image() hívás _SLAVE_FRAME_TIMEOUT_MS ms-ig vár a trigger
+            jelre. Ha ez letelik (kábel nincs bekötve?), hibát logolunk.
         """
-        logger.info("Képszerzési szál elindult: %s", self._info.name)
+        role_tag = f"[{self._sync_role.upper()}] " if self._sync_role else ""
+        logger.info("Képszerzési szál elindult: %s%s", role_tag, self._info.name)
 
         last_fps_time = time.perf_counter()
         fps_frame_count = 0
+        slave_timeout_warned = False  # Csak egyszer figyelmeztetünk timeout esetén
 
         while not self._stop_event.is_set():
             try:
                 # Frame megszerzése a Ximea kamerától
-                # Timeout: 1000 ms (ha ennyi idő alatt nincs frame, exception)
-                self._cam.get_image(self._xi_image, timeout=1000)
+                # MASTER/szoftver-szinkron: 1000 ms timeout
+                # SLAVE: _SLAVE_FRAME_TIMEOUT_MS (5000 ms) – várja a MASTER trigger jelét
+                self._cam.get_image(self._xi_image, timeout=self._frame_timeout_ms)
+
+                # Ha idáig eljutunk, a SLAVE megkapta a trigger jelet
+                if self._sync_role == "slave" and slave_timeout_warned:
+                    slave_timeout_warned = False
+                    logger.info(
+                        "  [SLAVE] Trigger jel újra megérkezett – HW szinkron helyreállt."
+                    )
 
                 # NumPy tömbbé alakítás
                 # MEGJEGYZÉS: A Ximea XI_RGB24 formátum BGR byte-sorrendben adja a pixeleket,
@@ -505,9 +725,11 @@ class XimeaCamera(BaseCamera):
                 # Alkalmazzuk az X/Y elmozdulást, tükrözést és elforgatást
                 bgr_image = self.apply_image_transformations(bgr_image)
 
-
-                # Frame metaadatok
-                timestamp = time.perf_counter()
+                # Frame metaadatok: hardveres kamera időbélyeg (ha elérhető), egyébként rendszer óra
+                try:
+                    timestamp = float(self._xi_image.tsSec) + (float(self._xi_image.tsUSec) * 1e-6)
+                except (AttributeError, TypeError):
+                    timestamp = time.perf_counter()
                 self._frame_count += 1
                 fps_frame_count += 1
 
@@ -547,11 +769,21 @@ class XimeaCamera(BaseCamera):
 
             except Exception as exc:
                 if not self._stop_event.is_set():
-                    # Csak akkor logolunk, ha nem szándékos leállás
-                    logger.error(
-                        "Képszerzési hiba (%s): %s",
-                        self._info.name, exc
-                    )
+                    # SLAVE timeout esetén külön figyelmeztetés (kábel nincs bekötve?)
+                    if self._sync_role == "slave" and not slave_timeout_warned:
+                        logger.error(
+                            "  [SLAVE] Trigger timeout! A MASTER kamera nem küld jelet. "
+                            "Ellenőrizd a kábel bekötését: "
+                            "Nem izolált mód: MASTER Pin8(Piros) → SLAVE Pin8(Piros) és MASTER Pin7(Kék/GND) → SLAVE Pin7(Kék/GND). "
+                            "Hiba: %s",
+                            exc
+                        )
+                        slave_timeout_warned = True
+                    elif self._sync_role != "slave":
+                        logger.error(
+                            "Képszerzési hiba (%s%s): %s",
+                            role_tag, self._info.name, exc
+                        )
                     time.sleep(0.01)  # Rövid szünet hiba után
 
-        logger.info("Képszerzési szál leállt: %s", self._info.name)
+        logger.info("Képszerzési szál leállt: %s%s", role_tag, self._info.name)

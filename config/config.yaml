@@ -84,6 +84,42 @@ camera:
     wb_kg: 1.0
     wb_kb: 2.1
 
+  # =============================================================================
+  # Hardveres GPIO szinkronizáció (CBL-702-8P-SYNC-5M0 kábel)
+  # =============================================================================
+  #
+  # 1. EGYSZERŰ NEM IZOLÁLT MÓD (3.3V LVTTL - Közvetlen bekötés, külső táp NÉLKÜL):
+  #    - Nem igényel külső tápegységet, a kamerák belső 3.3V LVTTL logikáját használja.
+  #    - Két kábel szabad éreinek összekötése:
+  #        JOBB MASTER Pin 8 (Piros / INOUT1) ──── BAL SLAVE Pin 8 (Piros / INOUT1)
+  #        JOBB MASTER Pin 7 (Kék / GND)       ──── BAL SLAVE Pin 7 (Kék / GND)
+  #    - A fennmaradó 6-6 eret (Fehér, Barna, Zöld, Sárga, Szürke, Rózsaszín)
+  #      szigetelni kell, hogy ne érjenek semmihez!
+  #
+  # 2. OPTO-IZOLÁLT MÓD (+5V külső tápegységgel - galvanikusan leválasztott):
+  #    - MASTER Pin 3 (Zöld / OUT1) Open Collector.
+  #        +5V ──────── SLAVE Pin 5 (Szürke / IN1)
+  #        SLAVE Pin 6 (Rózsaszín / IN-GND) ──── MASTER Pin 3 (Zöld / OUT1)
+  #        GND (5V -) ───────────────────────── MASTER Pin 4 (Sárga / OUT-GND)
+  #        MASTER Pin 7 (Kék / GND) ──────────── SLAVE Pin 7 (Kék / GND)
+  #
+  # EREDMÉNY: <10 µs szinkron jitter (vs. szoftver szinkron ~2 ms jitter)
+  sync:
+    enabled: true           # true = HW GPIO trigger | false = szoftver szinkron
+    master_side: "right"    # "right" = jobb kamera a MASTER (serial: CACAU2517001)
+                            # "left"  = bal kamera a MASTER (serial: CACAU2546000)
+    # --- MASTER kamera GPIO kimenet (Nem izolált PORT2 = Pin 8 Piros / INOUT1) ---
+    gpo_selector: "XI_GPO_PORT2"           # Pin 8 (Piros / INOUT1) nem izolált LVTTL kimenet
+    gpo_mode: "XI_GPO_EXPOSURE_ACTIVE"     # Pulzust ad ki az expozíció TELJES ideje alatt
+    # --- SLAVE kamera GPIO bemenet (Nem izolált PORT2 = Pin 8 Piros / INOUT1) ---
+    gpi_selector: "XI_GPI_PORT2"           # Pin 8 (Piros / INOUT1) nem izolált LVTTL bemenet
+    gpi_mode: "XI_GPI_TRIGGER"             # Trigger bemeneti mód
+    trigger_source: "XI_TRG_EDGE_RISING"   # Emelkedő élre triggerel (expozíció kezdetekor)
+    # --- Fallback ---
+    fallback_to_software_sync: true        # true = biztonságos visszaesés szoftver szinkronra ha nincs trigger
+
+
+
   # Mock kamera videófájlok (csak type="mock" esetén)
   mock:
     left_source: 0           # 0 = alapértelmezett webcam, vagy videófájl elérési út
@@ -128,16 +164,16 @@ geometry:
   baseline_mm: 2369.4
 
   # Kamerák magassága a talajthatól
-  camera_height_mm: 2900.0
+  camera_height_mm: 2570.0
 
   # Kamerák Z pozíciója (kapu síkjától mért távolság)
   # Negatív: gólvonal mögött (azaz a kapu belsejében), +Z a pálya felé mutat
   # A kamerák 900mm-rel vannak a gólvonal mögött
-  camera_z_offset_mm: -900.0
+  camera_z_offset_mm: 583.0
 
   # Kamerák lefelé dőlési szöge fokban (Pitch angle)
   # 0.0° = vízszintesen előre néznek. Ha a kamerák h=280cm magasan vannak és a pálya felé néznek pl 35-45°-ban.
-  camera_pitch_deg: 40
+  camera_pitch_deg: 43
 
   # ----- Kapu mérete -----
   goal_width_mm: 4000.0       # 4 méter széles

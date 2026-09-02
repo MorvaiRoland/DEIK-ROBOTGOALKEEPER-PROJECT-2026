@@ -444,7 +444,7 @@ class BallDetector:
 
             # Körkörösség számítása (circularity = 4 * pi * Area / Perimeter^2)
             circularity = (4.0 * np.pi * area) / (perimeter * perimeter)
-            if circularity < 0.20:  # Megengedőbb körkörösségi küszöb levegőben szálló labdákhoz
+            if circularity < 0.40:  # Szigorúbb körkörösségi küszöb: kizárja a cipőket, ruhadarabokat
                 continue
 
             # Bounding box méretarány (Aspect Ratio = szélesség / magasság)
@@ -461,12 +461,13 @@ class BallDetector:
             if hull_area <= 0:
                 continue
             solidity = area / float(hull_area)
-            if solidity < 0.55:
+            if solidity < 0.60:  # Szigorúbb tömörség: nem gömbölyű alakok kiszűrése
                 continue
 
             (x, y), radius = cv2.minEnclosingCircle(cnt)
-            # Sugár szűrés leméretezve (eredeti 6.0..160.0 -> 3.0..80.0)
-            if radius < (4.0 * scale) or radius > (180.0 * scale):
+            # Sugár szűrés leméretezve: minimum 12px az eredeti felbontáson (6px 50%-on)
+            # Kis „pontok" (zajdetektálás) kiszűrése a megnövelt minimummal
+            if radius < (6.0 * scale) or radius > (160.0 * scale):
                 continue
 
             # Szaturáció átlagának kiszámítása a kontúron belül
@@ -474,7 +475,8 @@ class BallDetector:
             cv2.drawContours(c_mask, [cnt], -1, 255, -1)
             mean_s = cv2.mean(hsv[:, :, 1], mask=c_mask)[0]
             
-            if mean_s < 45:
+            # Magasabb szaturáció-küszöb: halvány/szürke, nem narancsos objektumok kiszűrése
+            if mean_s < 70:
                 continue
 
             # Pontszámítás: (Körkörösség négyzete) * Tömörség * (Szaturáció aránya)
@@ -483,7 +485,10 @@ class BallDetector:
                 best_score = score
                 best_candidate = (x, y, radius, area, circularity)
 
-        if best_candidate is not None:
+        # Minimális pontszám-küszöb: kizárja a gyenge, bizonytalan jelölteket
+        # (pl. halvány narancsos foltok a falon, cipő, ruha sarokpontjai)
+        MIN_SCORE_THRESHOLD = 0.25
+        if best_candidate is not None and best_score >= MIN_SCORE_THRESHOLD:
             x_small, y_small, radius_small, area_small, circ = best_candidate
             
             # Visszaszorzás az eredeti felbontásra
@@ -658,9 +663,9 @@ class BallDetector:
             x1, y1, x2, y2 = float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
 
             # HSV szín-ellenőrzés (a ROI-vágott képen, ROI offsetelés előtt)
-            # Okos bypass: Ha a YOLO konfidenciája >= 0.20, elfogadjuk a detektálást közvetlenül,
-            # így a fekete/fehér mintázatú Kipsta labda sosem dobódik el tévesen!
-            if frame is not None and self._hsv_enabled and conf < 0.20:
+            # Bypass: csak magas konfidenciájú (>= 0.40) YOLO detektálás kerüli el a szín-ellenőrzést.
+            # Alacsony konf. esetén (cipő, kéz, ruha) kötelező a narancssárga szín ellenőrzése.
+            if frame is not None and self._hsv_enabled and conf < 0.40:
                 if not self._validate_orange_color(frame, x1, y1, x2, y2):
                     logger.debug(
                         "HSV ellenőrzés BUKOTT: box=[%.0f,%.0f,%.0f,%.0f] conf=%.2f → kihagyva",

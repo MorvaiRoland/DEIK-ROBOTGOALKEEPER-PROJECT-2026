@@ -6,16 +6,22 @@ Ez a modul koordinálja a bal és jobb oldali kamerák párhuzamos működését
 
 Feladatai:
     - Mindkét kamera párhuzamos megnyitása (ThreadPoolExecutor)
-    - Szinkronizált frame-párok megszerzése (szoftver szinkron)
+    - Szinkronizált frame-párok megszerzése (szoftver szinkron vagy HW GPIO trigger)
     - Kamera típus alapján példányosítás (Ximea / Mock)
     - Rendszer szintű FPS és állapot monitoring
 
-Megjegyzés a szinkronizálásról:
-    A szoftver szinkronizáció (mindkét kamerától egymás után olvasunk)
-    ~0.5-2 ms eltérést okozhat a két frame között. 100 FPS-en egy labda
-    8000 mm/s sebességgel kb. 4-16 mm-t tesz meg ennyi idő alatt – ez
-    elfogadható a rendszer pontosságához.
-    Ha jobb szinkronizálás kell: hardver trigger (Ximea GPIO).
+Szinkronizáció módok:
+    1. Szoftver szinkron (alapértelmezett, sync.enabled: false):
+       Mindkét kamerát egymás után olvassuk. ~0.5-2 ms jitter.
+
+    2. Hardveres GPIO trigger (sync.enabled: true):
+       A MASTER kamera GPIO OUT1 (Pin 3, Zöld) kimenetén expozíciós pulzust ad ki.
+       A SLAVE kamera GPIO IN1 (Pin 5, Szürke) bemenetén várja ezt a jelet.
+       Kábel: CBL-702-8P-SYNC-5M0, bekötés:
+           MASTER Pin 3 (Zöld/OUT1)     → SLAVE Pin 5 (Szürke/IN1)
+           MASTER Pin 4 (Sárga/OUT-GND) → SLAVE Pin 6 (Rózsaszín/IN-GND)
+           MASTER Pin 7 (Kék/GND)       → SLAVE Pin 7 (Kék/GND)
+       Eredmény: <10 µs szinkron jitter.
 """
 
 import logging
@@ -81,6 +87,10 @@ class CameraManager:
         """
         self._config = config
         self._cam_config = config["camera"]
+        # Szinkronizáció konfig
+        self._sync_config: dict = self._cam_config.get("sync", {})
+        self._hw_sync_enabled: bool = self._sync_config.get("enabled", False)
+        self._master_side: str = self._sync_config.get("master_side", "right").lower()
 
         self._cam_left: Optional[BaseCamera] = None
         self._cam_right: Optional[BaseCamera] = None
@@ -93,7 +103,24 @@ class CameraManager:
         self._measured_fps: float = 0.0
         self._fps_alpha: float = 0.1  # EMA simítás
 
-        logger.info("CameraManager inicializálva (típus: %s)", self._cam_config["type"])
+        if self._hw_sync_enabled:
+            master_sn = (
+                self._cam_config.get("right", {}).get("serial_number")
+                if self._master_side == "right"
+                else self._cam_config.get("left", {}).get("serial_number")
+            )
+            logger.info(
+                "CameraManager inicializálva (típus: %s) | "
+                "HW GPIO szinkron: BEKAPCSOLVA | MASTER: %s kamera (SN: %s)",
+                self._cam_config["type"],
+                self._master_side.upper(),
+                master_sn or "N/A"
+            )
+        else:
+            logger.info(
+                "CameraManager inicializálva (típus: %s) | Szinkron: szoftver mód",
+                self._cam_config["type"]
+            )
 
     # ------------------------------------------------------------------
     # Kamera életciklus
@@ -119,8 +146,26 @@ class CameraManager:
 
         # Ximea SDK esetén a kamerák megnyitását egymás után (szekvenciálisan) kell végezni,
         # különben a C++ xiAPI driver mutex ütközést (Error 57) ad.
-        ok_left = self._cam_left.open()
-        ok_right = self._cam_right.open()
+        #
+        # HW GPIO szinkron esetén a SLAVE-t ELŐSZÖR nyitjuk meg, hogy már készen
+        # álljon a trigger jelre mire a MASTER elindítja az expozíciót!
+        if self._hw_sync_enabled:
+            slave_is_left = (self._master_side == "right")  # ha jobb a MASTER, bal a SLAVE
+            cam_slave = self._cam_left if slave_is_left else self._cam_right
+            cam_master = self._cam_right if slave_is_left else self._cam_left
+            slave_label = "bal" if slave_is_left else "jobb"
+            master_label = "jobb" if slave_is_left else "bal"
+
+            logger.info("[HW SYNC] SLAVE (%s) megnyitása elsőként...", slave_label)
+            ok_slave = cam_slave.open()
+            logger.info("[HW SYNC] MASTER (%s) megnyitása...", master_label)
+            ok_master = cam_master.open()
+
+            ok_left = ok_slave if slave_is_left else ok_master
+            ok_right = ok_master if slave_is_left else ok_slave
+        else:
+            ok_left = self._cam_left.open()
+            ok_right = self._cam_right.open()
 
         if not ok_left:
             logger.error("Bal kamera megnyitása SIKERTELEN")
@@ -199,10 +244,15 @@ class CameraManager:
         sync_delta_ms = 0.0
         if frame_left.success and frame_right.success:
             sync_delta_ms = abs(frame_left.timestamp - frame_right.timestamp) * 1000.0
-            if sync_delta_ms > 5.0:
+            # HW GPIO szinkron esetén a jitter elvárhatóan <1 ms
+            # Szoftver szinkronnál a küszöb magasabb (~5 ms)
+            jitter_warn_threshold_ms = 1.0 if self._hw_sync_enabled else 5.0
+            if sync_delta_ms > jitter_warn_threshold_ms:
+                sync_mode = "HW GPIO" if self._hw_sync_enabled else "szoftver"
                 logger.warning(
-                    "Sztereo szinkron jitter NAGY: %.1f ms (bal=%.3f, jobb=%.3f) "
+                    "Sztereo szinkron jitter NAGY [%s mód]: %.1f ms (bal=%.3f, jobb=%.3f) "
                     "→ 3D pontossági hiba lehetséges!",
+                    sync_mode,
                     sync_delta_ms,
                     frame_left.timestamp,
                     frame_right.timestamp,
@@ -234,6 +284,18 @@ class CameraManager:
         cam_type = self._cam_config["type"].lower()
         side = "bal" if is_left else "jobb"
 
+        # Szinkronizációs szerepek meghatározása
+        sync_role: Optional[str] = None
+        if self._hw_sync_enabled and cam_type == "ximea":
+            if is_left:
+                sync_role = "slave" if self._master_side == "right" else "master"
+            else:
+                sync_role = "master" if self._master_side == "right" else "slave"
+            logger.info(
+                "  %s kamera sync szerepe: %s",
+                side.upper(), sync_role.upper()
+            )
+
         if cam_type == "ximea":
             # Ximea index: 0 = bal, 1 = jobb
             index = 0 if is_left else 1
@@ -244,13 +306,16 @@ class CameraManager:
             sn = merged_config.get("serial_number")
             if not sn:
                 sn = self._cam_config.get("serial_number_left") if is_left else self._cam_config.get("serial_number_right")
-                
-            logger.info("Ximea kamera létrehozása (%s, index=%d, sn=%s)", side, index, sn)
+
+            logger.info("Ximea kamera létrehozása (%s, index=%d, sn=%s, sync=%s)",
+                        side, index, sn, sync_role or "szoftver")
             return XimeaCamera(
                 camera_index=index,
                 is_left=is_left,
                 config=merged_config,
                 serial_number=sn,
+                sync_role=sync_role,
+                sync_config=self._sync_config,
             )
 
         elif cam_type in ("mock", "webcam"):

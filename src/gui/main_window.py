@@ -42,7 +42,7 @@ from PyQt6.QtGui import (
 # type: ignore
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDockWidget, QFormLayout, QFrame,
-    QGroupBox, QHBoxLayout, QLabel, QMainWindow,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QSizePolicy, QSlider, QSpinBox, QDoubleSpinBox, QStackedWidget, QStatusBar, QTabWidget,
     QToolBar, QVBoxLayout, QWidget
@@ -309,6 +309,7 @@ class StereoFrameSnapshot:
     left_frame_id: int
     right_frame_id: int
     timestamp: float
+    sync_delta_ms: float = 0.0  # Sztereó szinkron jitter ms-ben (HW triggerrel <1 ms)
 
 
 @dataclass
@@ -330,9 +331,167 @@ class TrackingState:
     left_future_2d: Optional[np.ndarray] = None
     right_future_2d: Optional[np.ndarray] = None
 
+    # True ha a ShotDetector megerősítette, hogy ez valódi lövés
+    # (csak akkor kerül be a statisztikába / analytics_view-ba)
+    shot_confirmed: bool = False
+
+
+class ShotDetector:
+    """
+    Valódi lövést azonosít a 3D trajektória historikából.
+
+    A fő elv: NEM a Kalman szűrő által becsült sebességre támaszkodik
+    (azt zajok is félrevihetik), hanem a TÉNYLEGESEN MÉRT Z-távolságok
+    trendjét vizsgálja. Ha a Z értékek monoton csökkennek (labda közeledik
+    a kapu felé), és a csökkenés elég gyors, az valódi lövés.
+
+    Feltételek a lövés elfogadásához (MINDEGYIKNEK teljesülnie kell):
+        1. Legalább MIN_Z_POINTS mérési pont a historikában
+        2. A Z-értékek lineáris regressziója: dZ/dt <= -VZ_TREND_MM_S (közeledik)
+        3. Az utolsó Z érték a valódi lövési tartományban van (Z_MIN .. Z_MAX)
+        4. A Z-trend R² értéke >= MIN_R2 (konzisztens közeledés, nem zaj)
+        5. Az előző lövés óta eltelt >= COOLDOWN_S másodperc
+    """
+
+    # Minimális mérési pontok száma a lövés ítéletéhez
+    MIN_Z_POINTS: int = 6
+
+    # Z-trend (dZ/dt) küszöb: ennél gyorsabban kell közeledni (mm/s)
+    # 2000 mm/s = 2 m/s – lassabb mozgás nem lövés
+    VZ_TREND_MM_S: float = 2000.0
+
+    # Valódi lövési Z tartomány (mm) – a labdának ezen belül kell lennie
+    Z_MIN_MM: float = 500.0    # minimum: már majdnem a kapunál
+    Z_MAX_MM: float = 15000.0  # maximum: 15 méter
+
+    # Lineáris regresszió R² küszöb (0..1): konzisztens közeledés kell
+    # 0.70: a pontok 70%-ban illeszkedjenek az egyenesre
+    MIN_R2: float = 0.70
+
+    # Cooldown két lövés között (másodperc)
+    COOLDOWN_S: float = 2.5
+
+    def __init__(self) -> None:
+        self._last_shot_time: float = 0.0
+        self._shot_active: bool = False
+        logger.debug("ShotDetector inicializálva (Z-trend alapú)")
+
+    def update(
+        self,
+        predictor,          # TrajectoryPredictor példány
+        impact,             # Optional[ImpactPrediction]
+        pos_3d_valid: bool, # Van-e érvényes 3D pozíció ebben a frame-ben
+    ) -> bool:
+        """
+        Megvizsgálja az aktuális állapotot és eldönti, hogy éppen lövés történik-e.
+
+        A döntés a Z-historikán alapul: lineáris regresszióval ellenőrzi,
+        hogy a labda konzisztensen közeledik-e a kapu felé.
+
+        Returns:
+            True ha ez egy újonnan megerősített lövési esemény.
+            Cooldown alatt, zaj esetén, lassú mozgásnál: False.
+        """
+        import time as _time
+        now = _time.perf_counter()
+
+        # Ha nincs érvényes 3D pozíció ebben a frame-ben → nem lövés
+        # (de ne nullázzuk a shot_active-ot, a cooldown fut tovább)
+        if not pos_3d_valid:
+            self._shot_active = False
+            return False
+
+        # Impact prediction kell az érvényesítéshez
+        if impact is None or not impact.valid:
+            self._shot_active = False
+            return False
+
+        # Historika pontok ellenőrzése
+        history = predictor.get_trajectory_history_mm()
+        n = len(history)
+        if n < self.MIN_Z_POINTS:
+            self._shot_active = False
+            return False
+
+        # --- Z-értékek kinyerése a historikából ---
+        # A history lista (x, y, z) tuple-ok idő szerint növekvő sorrendben
+        z_vals = [pt[2] for pt in history]
+        last_z = z_vals[-1]
+
+        # Valódi lövési Z tartomány ellenőrzése
+        if not (self.Z_MIN_MM <= last_z <= self.Z_MAX_MM):
+            self._shot_active = False
+            return False
+
+        # --- Lineáris regresszió a Z-trendjéhez ---
+        # Idő helyett index-et használunk (egyenletes mintavételezés feltételezése)
+        import numpy as _np
+        # Utolsó min(n, 15) pontot vizsgáljuk
+        window = min(n, 15)
+        z_window = _np.array(z_vals[-window:], dtype=_np.float64)
+        t_window = _np.arange(window, dtype=_np.float64)
+
+        # Lineáris illesztés: z = a*t + b
+        # A slope (a) negatív ha közeledik
+        t_mean = t_window.mean()
+        z_mean = z_window.mean()
+        t_centered = t_window - t_mean
+        z_centered = z_window - z_mean
+
+        ss_tt = float(_np.dot(t_centered, t_centered))
+        if ss_tt < 1e-9:
+            self._shot_active = False
+            return False
+
+        slope = float(_np.dot(t_centered, z_centered)) / ss_tt  # dZ/frame
+
+        # slope → dZ/dt becslés: feltételezzük ~10 FPS detektálási ráta
+        # (a valódi FPS változó, de a durva becslés elegendő)
+        DET_FPS_ESTIMATE = 10.0  # konzervatív becslés
+        vz_trend = slope * DET_FPS_ESTIMATE  # mm/s (negatív = közeledik)
+
+        # R² kiszámítása (illeszkedés minősége)
+        z_pred = slope * t_centered + z_mean
+        ss_res = float(_np.sum((z_window - z_pred) ** 2))
+        ss_tot = float(_np.dot(z_centered, z_centered))
+        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-9 else 0.0
+
+        # Feltételek ellenőrzése
+        approaching = vz_trend <= -self.VZ_TREND_MM_S  # Elég gyors közeledés
+        consistent = r2 >= self.MIN_R2                  # Konzisztens trend
+
+        if not approaching or not consistent:
+            self._shot_active = False
+            return False
+
+        # Ha már folyamatban lévő lövés (ugyanazon lövés) → ne rögzítsük újra
+        if self._shot_active:
+            return False
+
+        # Cooldown ellenőrzése
+        if (now - self._last_shot_time) < self.COOLDOWN_S:
+            return False
+
+        # ✓ Valódi lövés detektálva!
+        self._shot_active = True
+        self._last_shot_time = now
+        logger.info(
+            "LÖVÉS DETEKTÁLVA ✓: vz_trend=%.0f mm/s, R²=%.2f, Z=%.0f mm, "
+            "impact=(X=%+.0f mm, Y=%.0f mm, t=%.3f s)",
+            vz_trend, r2, last_z,
+            impact.x_mm, impact.y_mm, impact.time_to_impact_s,
+        )
+        return True
+
+    def reset(self) -> None:
+        """Visszaállítja az állapotot."""
+        self._shot_active = False
+        self._last_shot_time = 0.0
+
 
 class LatestStereoFrame:
     """One-slot exchange: consumers always receive the newest available pair."""
+
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
@@ -477,6 +636,9 @@ class DetectionWorker(threading.Thread):
                 except Exception:
                     pass
 
+            # --- Lövés detektor (valódi lövés elkülönítése a normális mozgástól) ---
+            shot_detector = ShotDetector()
+
             with self._detector_lock:
                 self._detector = detector
                 for is_left, roi in self._roi_settings.items():
@@ -594,15 +756,49 @@ class DetectionWorker(threading.Thread):
                         logger.debug("MonoZ 3D tartalék aktiválva: Z=%.0f mm", pos_3d[2])
 
                 if pos_3d is not None:
-                    predictor.add_measurement(
-                        x_mm=float(pos_3d[0]),
-                        y_mm=float(pos_3d[1]),
-                        z_mm=float(pos_3d[2]),
+                    # --- Minőségi kapu a trajektória előrejelzőhöz ---
+                    # Csak akkor adjuk hozzá a mérést a prediktorhoz, ha MINDKÉT
+                    # kamera elég megbízható, elég nagy labdát talált.
+                    # Ez megakadályozza, hogy kis zajpontok (cipő, ruha, pixel-zaj)
+                    # "megmérgezzék" a historikát és hamis lövéseket generáljanak.
+                    #
+                    # Konfidencia küszöb: 0.30 (YOLO 30%+ vagy fallback blob 0.60)
+                    # Sugár küszöb: 8px – ennél kisebb pont nem lehet egy valódi labda
+                    QUALITY_MIN_CONF = 0.30
+                    QUALITY_MIN_RADIUS = 8.0
+
+                    left_quality_ok = (
+                        left_det.found
+                        and left_det.confidence >= QUALITY_MIN_CONF
+                        and left_det.radius >= QUALITY_MIN_RADIUS
                     )
+                    right_quality_ok = (
+                        right_det.found
+                        and right_det.confidence >= QUALITY_MIN_CONF
+                        and right_det.radius >= QUALITY_MIN_RADIUS
+                    )
+
+                    if left_quality_ok and right_quality_ok:
+                        predictor.add_measurement(
+                            x_mm=float(pos_3d[0]),
+                            y_mm=float(pos_3d[1]),
+                            z_mm=float(pos_3d[2]),
+                        )
+                    else:
+                        # Alacsony minőségű detektálás: nem adjuk hozzá a historikához,
+                        # de a prediktort se nullázzuk – várjuk vissza a labdát
+                        logger.debug(
+                            "Quality gate: mérés KIZÁRVA (L: conf=%.2f r=%.1f, R: conf=%.2f r=%.1f)",
+                            left_det.confidence, left_det.radius,
+                            right_det.confidence, right_det.radius,
+                        )
                     impact = predictor.get_impact_prediction()
                 else:
+                    # Nincs 3D pozíció: ha a Kalman tracker sem inicializált (nincs labda),
+                    # töröljük a historikát – így a régi zaj-mérések nem terhelik a prediktort
                     if not self._kalman_left.is_initialized and not self._kalman_right.is_initialized:
                         predictor.reset()
+                        shot_detector.reset()   # Lövés állapot is törlődik
                     impact = predictor.get_impact_prediction()
 
                 # Trajektória pontok visszavetítése 2D-be (ha van kalibráció)
@@ -624,6 +820,20 @@ class DetectionWorker(threading.Thread):
                         left_future = triangulator.project_to_2d(future_path_3d, is_left=True)
                         right_future = triangulator.project_to_2d(future_path_3d, is_left=False)
 
+                # --- Lövés detektálás ---
+                # Csak valódi lövésnél (gyors, kapu felé tartó labda) hozzuk létre a lövés eseményt.
+                # pos_3d_valid csak akkor True, ha quality gate is átment (mindkét kamera megbízható)
+                quality_ok = (
+                    pos_3d is not None
+                    and left_det.found and left_det.confidence >= 0.30 and left_det.radius >= 8.0
+                    and right_det.found and right_det.confidence >= 0.30 and right_det.radius >= 8.0
+                )
+                shot_confirmed = shot_detector.update(
+                    predictor=predictor,
+                    impact=impact,
+                    pos_3d_valid=quality_ok,
+                )
+
                 self._result_exchange.publish(
                     TrackingState(
                         source_sequence=snapshot.sequence,
@@ -638,6 +848,7 @@ class DetectionWorker(threading.Thread):
                         right_past_2d=right_past,
                         left_future_2d=left_future,
                         right_future_2d=right_future,
+                        shot_confirmed=shot_confirmed,
                     )
                 )
         except Exception as exc:
@@ -882,6 +1093,7 @@ class TrackerWorker(QThread):
                 left_frame_id=pair.left.frame_id,
                 right_frame_id=pair.right.frame_id,
                 timestamp=pair.timestamp,
+                sync_delta_ms=pair.sync_delta_ms,
             )
             self._frame_exchange.publish(snapshot)
 
@@ -946,6 +1158,7 @@ class TrackerWorker(QThread):
                     "vx_mms": vx, "vy_mms": vy, "vz_mms": vz,
                     "speed_ms": np.sqrt(vx**2 + vy**2 + vz**2) / 1000.0,
                     "impact": impact,
+                    "shot_confirmed": state.shot_confirmed if state else False,
                     "calibrated": state.calibrated if state else False,
                     # Teljes képkori késés: a zöld jelöléshez tartozó bemeneti
                     # frame és az épp kijelzett kamera-frame közti idő.
@@ -958,6 +1171,7 @@ class TrackerWorker(QThread):
                         if state else 0.0
                     ),
                     "detection_frame_lag": self._snapshot_sequence - state.source_sequence if state else 0,
+                    "sync_delta_ms": snapshot.sync_delta_ms,
                 }
                 self.frames_ready.emit(frame_left, frame_right, stats)
 
@@ -1354,11 +1568,11 @@ class MainWindow(QMainWindow):
 
         # 3D Telemetriai Kártyák
         tel_grp = QGroupBox("ÉLŐ 3D TELEMETRIA / VÉDELMI ZÓNA ELŐREJELZÉS")
-        tel_box = QHBoxLayout(tel_grp)
-        tel_box.setSpacing(12)
+        tel_box = QGridLayout(tel_grp)
+        tel_box.setSpacing(6)
         tel_box.setContentsMargins(12, 18, 12, 10)
 
-        font_val = QFont("Consolas", 12, QFont.Weight.Bold)
+        font_val = QFont("Consolas", 11, QFont.Weight.Bold)  # Kicsit kisebb betűméret, hogy biztosan kiférjen
 
         def make_card(title: str, color: str = "#0F5132") -> tuple[QLabel, QWidget]:
             w = QWidget()
@@ -1366,8 +1580,13 @@ class MainWindow(QMainWindow):
             v.setContentsMargins(6, 4, 6, 4)
             v.setSpacing(2)
             t_lbl = QLabel(title)
+            t_lbl.setWordWrap(True)
+            # A címkét picit kisebb, vastag betűvel írjuk ki a jobb tördelés miatt
+            font_title = QFont("Segoe UI", 9, QFont.Weight.Bold)
+            t_lbl.setFont(font_title)
             val_lbl = QLabel("—")
             val_lbl.setFont(font_val)
+            val_lbl.setWordWrap(True)
             v.addWidget(t_lbl)
             v.addWidget(val_lbl)
             self._telemetry_cards.append((w, t_lbl, val_lbl, color))
@@ -1376,13 +1595,20 @@ class MainWindow(QMainWindow):
         self._lbl_x, card_x = make_card("LABDA X (MM)")
         self._lbl_y, card_y = make_card("LABDA Y (MM)")
         self._lbl_z, card_z = make_card("LABDA Z (MM)")
-        self._lbl_speed, card_sp = make_card("SEBESSÉG", "#059669")
-        self._lbl_impact, card_imp = make_card("BECSAPÓDÁS (X, Y)", "#D97706")
+        self._lbl_speed, card_sp = make_card("SEBESSÉG (KM/H)", "#059669")
+        self._lbl_impact, card_imp = make_card("BECSAPÓDÁS (X,Y)", "#D97706")
         self._lbl_time, card_time = make_card("IDŐ (MP)", "#D97706")
-        self._lbl_zone, card_zone = make_card("VÉDELMI SZEKTOR", "#0F5132")
+        self._lbl_zone, card_zone = make_card("SZEKTOR", "#0F5132")
 
-        for card in [card_x, card_y, card_z, card_sp, card_imp, card_time, card_zone]:
-            tel_box.addWidget(card)
+        # 2 sorba rendezzük a kártyákat a Grid-ben (első sor 4 kártya, második sor 3 kártya)
+        tel_box.addWidget(card_x, 0, 0)
+        tel_box.addWidget(card_y, 0, 1)
+        tel_box.addWidget(card_z, 0, 2)
+        tel_box.addWidget(card_sp, 0, 3)
+        
+        tel_box.addWidget(card_imp, 1, 0, 1, 2)  # A becsapódás 2 oszlopnyi helyet foglal el
+        tel_box.addWidget(card_time, 1, 2)
+        tel_box.addWidget(card_zone, 1, 3)
 
         comb_layout.addWidget(tel_grp, stretch=1)
         self._central_stack.addWidget(page_comb)
@@ -1810,6 +2036,7 @@ class MainWindow(QMainWindow):
         self._lbl_diag_fps_pair = QLabel("— FPS")
         self._lbl_diag_fps_det = QLabel("— FPS")
         self._lbl_diag_calib = QLabel("OK (Stereo Calibrated)")
+        self._lbl_diag_sync_delta = QLabel("— ms")
 
         cam_form.addRow("Bal Kamera FPS:", self._lbl_diag_fps_l)
         cam_form.addRow("Bal Hőmérséklet:", self._lbl_diag_temp_l)
@@ -1818,6 +2045,7 @@ class MainWindow(QMainWindow):
         cam_form.addRow("Sztereó Pár FPS:", self._lbl_diag_fps_pair)
         cam_form.addRow("YOLO Detektálás FPS:", self._lbl_diag_fps_det)
         cam_form.addRow("Kalibrációs Státusz:", self._lbl_diag_calib)
+        cam_form.addRow("Sztereó Szinkron Jitter:", self._lbl_diag_sync_delta)
 
         layout.addWidget(cam_grp)
 
@@ -2044,11 +2272,14 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_clear_history(self) -> None:
-        if hasattr(self, "_goal_view") and self._goal_view:
-            self._goal_view.clear_history()
-        if hasattr(self, "_goal_view_full") and self._goal_view_full:
-            self._goal_view_full.clear_history()
-        logger.info("Lövés történet törölve.")
+        # A GoalViewWidget a reset_stats() metódust használja a teljes előzmény és statisztika törléséhez
+        if hasattr(self, "_goal_view") and hasattr(self._goal_view, "reset_stats"):
+            self._goal_view.reset_stats()
+        if hasattr(self, "_goal_view_full") and hasattr(self._goal_view_full, "reset_stats"):
+            self._goal_view_full.reset_stats()
+        if hasattr(self, "_analytics_view") and hasattr(self._analytics_view, "_clear_analytics"):
+            self._analytics_view._clear_analytics()
+        logger.info("Lövés történet és statisztikák sikeresen törölve.")
 
     def _apply_camera_overlay_info(self, frame: np.ndarray, side: str, fps: float) -> np.ndarray:
         """Kirajzolja az FPS és kamera info overlay-t közvetlenül a képkockára."""
@@ -2142,14 +2373,17 @@ class MainWindow(QMainWindow):
                     in_goal=impact.in_goal,
                 )
             if hasattr(self, "_analytics_view") and self._analytics_view:
-                speed_kmh = (stats.get("speed_m_s", 12.5) or 12.5) * 3.6
-                self._analytics_view.add_shot_event(
-                    x_mm=impact.x_mm,
-                    y_mm=impact.y_mm,
-                    conf=impact.confidence,
-                    in_goal=impact.in_goal,
-                    speed_kmh=speed_kmh
-                )
+                # Csak valódi lövésnél (ShotDetector által megerősített) rögzítünk eseményt!
+                # Cooldown nélkül egy lövés >100 frame-en át rögzítődne.
+                if stats.get("shot_confirmed", False):
+                    speed_kmh = (stats.get("speed_ms", 12.5) or 12.5) * 3.6
+                    self._analytics_view.add_shot_event(
+                        x_mm=impact.x_mm,
+                        y_mm=impact.y_mm,
+                        conf=impact.confidence,
+                        in_goal=impact.in_goal,
+                        speed_kmh=speed_kmh
+                    )
         else:
             self._lbl_impact.setText("—")
             self._lbl_time.setText("—")
@@ -2176,6 +2410,26 @@ class MainWindow(QMainWindow):
 
             cal_str = "OK (Stereo Calibrated)" if stats.get("calibrated", True) else "HIBA (Nincs Kalibrálva)"
             self._lbl_diag_calib.setText(cal_str)
+
+            # Sztereó szinkron jitter megjelenítése színkódolással
+            delta_ms = stats.get("sync_delta_ms", 0.0)
+            if delta_ms < 1.0:
+                # HW GPIO trigger: <1 ms = kiváló szinkron
+                color = "#00e676"   # élénkzöld
+                status = "✓ HW SYNC OK"
+            elif delta_ms < 5.0:
+                # Szoftver szinkron tartomány
+                color = "#ffeb3b"   # sárga
+                status = "⚠ Szoftver szinkron"
+            else:
+                # Túl nagy jitter – hiba
+                color = "#ff5252"   # piros
+                status = "✗ JITTER HIBA"
+            self._lbl_diag_sync_delta.setText(
+                f"<span style='color:{color}; font-weight:bold;'>"
+                f"{delta_ms:.3f} ms – {status}</span>"
+            )
+            self._lbl_diag_sync_delta.setTextFormat(Qt.TextFormat.RichText)
 
             self._lbl_diag_det_status.setText(det_str)
             if stats["pos_valid"]:
