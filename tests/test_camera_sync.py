@@ -1,8 +1,10 @@
 """
 Tests for CameraManager sync configuration and role assignment.
 """
+# pyrefly: ignore [missing-import]
 import pytest
-from camera.camera_manager import CameraManager
+# pyrefly: ignore [missing-import]
+from camera.camera_manager import CameraManager 
 
 def test_camera_sync_config_roles():
     config = {

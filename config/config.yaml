@@ -36,7 +36,7 @@ camera:
 
   # Célzott frame rate (a kamera max. 165 FPS-t tud)
   # Javasolt: 100 FPS – gyors mozgáshoz elegendő, USB sávszélesség stabil
-  fps: 100
+  fps: 144
 
   # Zársebesség mikroszekundumban (1/fps * 1e6 a max mozgásblur nélkül)
   # 100 FPS-nél: max 10000 µs; javasolt: 2000-5000 µs erős megvilágításnál
@@ -105,18 +105,23 @@ camera:
   #
   # EREDMÉNY: <10 µs szinkron jitter (vs. szoftver szinkron ~2 ms jitter)
   sync:
-    enabled: true           # true = HW GPIO trigger | false = szoftver szinkron
+    enabled: false  # true = HW GPIO trigger | false = szoftver szinkron
     master_side: "right"    # "right" = jobb kamera a MASTER (serial: CACAU2517001)
                             # "left"  = bal kamera a MASTER (serial: CACAU2546000)
-    # --- MASTER kamera GPIO kimenet (Nem izolált PORT2 = Pin 8 Piros / INOUT1) ---
-    gpo_selector: "XI_GPO_PORT2"           # Pin 8 (Piros / INOUT1) nem izolált LVTTL kimenet
-    gpo_mode: "XI_GPO_EXPOSURE_ACTIVE"     # Pulzust ad ki az expozíció TELJES ideje alatt
-    # --- SLAVE kamera GPIO bemenet (Nem izolált PORT2 = Pin 8 Piros / INOUT1) ---
-    gpi_selector: "XI_GPI_PORT2"           # Pin 8 (Piros / INOUT1) nem izolált LVTTL bemenet
-    gpi_mode: "XI_GPI_TRIGGER"             # Trigger bemeneti mód
-    trigger_source: "XI_TRG_EDGE_RISING"   # Emelkedő élre triggerel (expozíció kezdetekor)
+    # --- MASTER kamera GPIO kimenet (Opto-izolalt, Pin 3 / Zold / OUT1 = PORT1) ---
+    # XI_GPO_PORT1 = Pin 3 (Zold/OUT1) – Open Collector opto-izolalt kimenet
+    # FONTOS: Open Collector – nem izolalt modnal a ket 4k7 soros ellenallas
+    # leranta a feszultseget (1.2V < 1.3V kuszob) → csak opto-izolalt modban mukodik!
+    gpo_selector: "XI_GPO_PORT1"           # Pin 3 (Zold/OUT1) – opto kimenet
+    gpo_mode: "XI_GPO_EXPOSURE_ACTIVE"     # Pulzust ad ki az expozicio TELJES ideje alatt
+    # --- SLAVE kamera GPIO bemenet (Opto-izolalt, Pin 5 / Szurke / IN1 = PORT1) ---
+    # XI_GPI_PORT1 = Pin 5 (Szurke/IN1) – Opto-izolalt bemenet (4-24V high kuszob)
+    # Bekotek: MASTER Pin3 (Zold)→SLAVE Pin5 (Szurke), MASTER Pin4 (Sarga)→SLAVE Pin6 (Rozsaszin)
+    gpi_selector: "XI_GPI_PORT1"           # Pin 5 (Szurke/IN1) – opto bemenet
+    gpi_mode: "XI_GPI_TRIGGER"             # Trigger bemeneti mod
+    trigger_source: "XI_TRG_EDGE_RISING"   # Emelkedo elre triggerel
     # --- Fallback ---
-    fallback_to_software_sync: true        # true = biztonságos visszaesés szoftver szinkronra ha nincs trigger
+    fallback_to_software_sync: false        # true = visszaeses szoftver szinkronra ha nincs trigger jel
 
 
 
@@ -243,7 +248,7 @@ ball:
 detection:
   # ----- Modell Választás -----
   # "models/rtdetr-l.engine" → Real-Time Detection Transformer (RT-DETR) TensorRT batch=2 GPU modell
-  model_path: "models/yolov8n.engine"
+  model_path: "models/yolov8n.engine
 
   # COCO modell osztály ID: 32 (sports ball)
   ball_class_id: 32

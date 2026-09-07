@@ -471,14 +471,13 @@ class XimeaCamera(BaseCamera):
         except Exception as exc:
             logger.warning("  Puffer optimalizálás részben sikertelen: %s", exc)
 
-
         # ================================================================
         # Hardveres GPIO szinkronizáció konfigurálása
         # ================================================================
-        # A MASTER expozíció ELEJÉN az OUT1 (Pin 3, Zöld) kimenet HIGH lesz.
-        # Ez az optó-izolált jel a kábelen keresztül a SLAVE IN1 (Pin 5, Szürke)
-        # bemenetére kerül, ahol az emelkedő él (RISING EDGE) triggeri a SLAVE
-        # kamera expozícióját. Eredmény: <10 µs szinkron jitter.
+        # A MASTER expozíció ELEJÉN a kiválasztott GPO port aktívvá válik.
+        # Ez a jel a kábelen keresztül a SLAVE megfelelő GPI portjára kerül,
+        # ahol a beállított él (RISING/FALLING) triggeri a SLAVE kamera
+        # expozícióját.
         if self._sync_role == "master":
             self._configure_gpio_master()
         elif self._sync_role == "slave":
@@ -490,8 +489,9 @@ class XimeaCamera(BaseCamera):
         """
         MASTER kamera GPIO kimenet konfigurálása.
 
-        - Nem izolált mód (XI_GPO_PORT2): Pin 8 (Piros / INOUT1) 3.3V LVTTL kimenet
-        - Opto-izolált mód (XI_GPO_PORT1): Pin 3 (Zöld / OUT1) Open Collector kimenet
+        A port és mód a sync_config-ból jön, hogy konfigban válthass
+        opto-izolált (PORT1) és nem-izolált (PORT2) mód között kód-
+        módosítás nélkül.
         """
         if self._cam is None:
             return
@@ -500,30 +500,50 @@ class XimeaCamera(BaseCamera):
         gpo_mode = self._sync_config.get("gpo_mode", "XI_GPO_EXPOSURE_ACTIVE")
 
         try:
+            # MASTER folyamatos képszerzés (nem vár triggerre)
+            self._cam.set_trigger_source("XI_TRG_OFF")
+
+            # GPO beállítása a configban megadott port/mód szerint
             self._cam.set_gpo_selector(gpo_selector)
             self._cam.set_gpo_mode(gpo_mode)
-            pin_desc = (
-                "Pin 8 (Piros/INOUT1 nem izolált)" if gpo_selector == "XI_GPO_PORT2"
-                else "Pin 3 (Zöld/OUT1 opto-izolált)"
-            )
+
+            logger.info("  [MASTER] Trigger source = XI_TRG_OFF")
             logger.info(
-                "  [MASTER] GPIO kimenet beállítva: %s → %s | "
-                "Kábel %s adja a trigger pulzust a SLAVE-nek.",
-                gpo_selector, gpo_mode, pin_desc
+                "  [MASTER] GPO beállítva: %s / %s",
+                gpo_selector, gpo_mode,
             )
+
         except Exception as exc:
             logger.error(
-                "  [MASTER] GPIO kimenet beállítási HIBA (%s → %s): %s "
-                "| Ellenőrizd a kábel csatlakozását!",
-                gpo_selector, gpo_mode, exc
+                "  [MASTER] GPIO konfigurációs HIBA (%s/%s): %s "
+                "| Ellenőrizd, hogy ez a port/mód támogatott-e ezen a kamerán!",
+                gpo_selector, gpo_mode, exc,
+                exc_info=True,
             )
 
     def _configure_gpio_slave(self) -> None:
         """
         SLAVE kamera GPIO bemenet és trigger konfigurálása.
 
-        - Nem izolált mód (XI_GPI_PORT2): Pin 8 (Piros / INOUT1) 3.3V LVTTL bemenet
-        - Opto-izolált mód (XI_GPI_PORT1): Pin 5 (Szürke / IN1) opto-izolált bemenet
+        Pin / PORT megfeleltetés (XIMEA hardware manual, Table 131):
+            Pin 8 (Piros/INOUT1)  → GPI/GPO index API: 2/2 → XI_GPI_PORT2 / XI_GPO_PORT2
+            Pin 2 (Barna/INOUT2)  → GPI/GPO index API: 3/3 → XI_GPI_PORT3 / XI_GPO_PORT3
+            Pin 5 (Szürke/IN1)    → GPI/GPO index API: 1/- → XI_GPI_PORT1 (csak bemenet!)
+            Pin 3 (Zöld/OUT1)     → GPI/GPO index API: -/1 → XI_GPO_PORT1 (csak kimenet!)
+
+        High-Z megjegyzés (Section 2.10.2 és 2.10.4 alapján):
+            - Dedikált OUT-only pinek (OUT1 stb., más kameramodellek): High-Z NEM támogatott,
+              mert unidirectionális szintfordítón megy át a jel.
+            - INOUT pinek (Pin 8 INOUT1, Pin 2 INOUT2): ezek valódi bidirekcionális vonalak,
+              4k7 soros védelmi ellenállással és 100kΩ belső pull-down-nal (Figure 68).
+              A High-Z beállítás itt IS megpróbálható (nem biztos, de biztonságos),
+              mert a try/except kezeli ha az SDK nem támogatja.
+
+        INOUT elektromos jelszintek (Section 2.10.4 / Figure 68):
+            - Logical 0 bemenet: < 0.3 V
+            - Logical 1 bemenet: > 1.3 V  (MASTER LVTTL 3.3V kimenete ✓ kompatibilis)
+            - Bemeneti impedancia: min. 15 kΩ
+            - Input delay rising edge: 300 ns
         """
         if self._cam is None:
             return
@@ -532,42 +552,60 @@ class XimeaCamera(BaseCamera):
         gpi_mode = self._sync_config.get("gpi_mode", "XI_GPI_TRIGGER")
         trigger_source = self._sync_config.get("trigger_source", "XI_TRG_EDGE_RISING")
 
+        # Pin leírás (Table 131 alapján)
+        pin_desc = (
+            "Pin 8 (Piros/INOUT1, nem izolált, PORT2)" if gpi_selector == "XI_GPI_PORT2"
+            else "Pin 5 (Szürke/IN1, opto-izolált, PORT1)" if gpi_selector == "XI_GPI_PORT1"
+            else "Pin 2 (Barna/INOUT2, nem izolált, PORT3)" if gpi_selector == "XI_GPI_PORT3"
+            else gpi_selector
+        )
+
         try:
-            # 1. GPI port kiválasztása és trigger módba állítása
+            # --- 1. lépés: GPO HIGH_IMPEDANCE kísérlet (bidirekcionális INOUT pin) ---
+            # A Pin 8/INOUT1 (PORT2) bidirekcionális, 4k7 soros védelemmel (Figure 68).
+            # High-Z beállítás megpróbálható; ha az SDK nem támogatja, a try/except
+            # logol, de a szinkron attól még működhet (a 4k7 soros ellenállás véd).
+            # MEGJEGYZÉS: Dedikált OUT-only pineken (Section 2.10.2) High-Z NEM támogatott
+            # (unidirectionális szintfordító miatt) – ott az except ág fog futni.
+            try:
+                self._cam.set_gpo_selector(gpi_selector.replace("GPI", "GPO"))
+                self._cam.set_gpo_mode("XI_GPO_HIGH_IMPEDANCE")
+                logger.info(
+                    "  [SLAVE] %s kimenet High-Z-re állítva (bidirekcionális INOUT pin)",
+                    pin_desc,
+                )
+            except Exception as exc:
+                # INOUT pineken ez normálisan nem fordul elő.
+                # Ha mégis, a 4k7 soros ellenállás megakadályozza a rövidzárlatot,
+                # de a MASTER jelét tompíthatja – naplózzuk, de nem állítjuk le a programot.
+                logger.warning(
+                    "  [SLAVE] High-Z beállítás nem sikerült (%s): %s "
+                    "| A 4k7 soros ellenállás véd, de a trigger jel gyengébb lehet.",
+                    gpi_selector, exc,
+                )
+
+            # --- 2. lépés: GPI selector és mód beállítása ---
             self._cam.set_gpi_selector(gpi_selector)
             self._cam.set_gpi_mode(gpi_mode)
-            pin_desc = (
-                "Pin 8 (Piros/INOUT1 nem izolált)" if gpi_selector == "XI_GPI_PORT2"
-                else "Pin 5 (Szürke/IN1 opto-izolált)"
-            )
             logger.info(
-                "  [SLAVE] GPIO bemenet beállítva: %s → %s | "
-                "Kábel %s fogadja a MASTER trigger pulzusát.",
-                gpi_selector, gpi_mode, pin_desc
+                "  [SLAVE] GPIO bemenet beállítva: %s → %s | %s fogadja a "
+                "MASTER trigger jelét.",
+                gpi_selector, gpi_mode, pin_desc,
             )
 
-            # 2. Bidirekcionális pin (Pin 8 / PORT2) esetén a SLAVE kimeneti meghajtóját
-            # High Impedance (XI_GPO_OFF) állapotba állítjuk, hogy bemenetként működjön!
-            if gpi_selector == "XI_GPI_PORT2":
-                try:
-                    self._cam.set_gpo_selector("XI_GPO_PORT2")
-                    self._cam.set_gpo_mode("XI_GPO_OFF")
-                    logger.info("  [SLAVE] PORT2 (Pin 8 INOUT1) kimenet kikapcsolva: XI_GPO_OFF (High Impedance / bemenet)")
-                except Exception as exc:
-                    logger.debug("  [SLAVE] GPO OFF beállítás nem sikerült (elmaradhat): %s", exc)
-
-            # 3. Trigger forrás: külső jel emelkedő élére
+            # --- 3. lépés: trigger forrás beállítása ---
             self._cam.set_trigger_source(trigger_source)
             logger.info(
-                "  [SLAVE] Trigger forrás: %s (MASTER expozíció kezdetén triggerel)",
-                trigger_source
+                "  [SLAVE] Trigger forrás: %s (MASTER jelére triggerel)",
+                trigger_source,
             )
 
         except Exception as exc:
             logger.error(
                 "  [SLAVE] GPIO trigger beállítási HIBA (%s/%s/%s): %s "
-                "| Ellenőrizd a kábel csatlakozását!",
-                gpi_selector, gpi_mode, trigger_source, exc
+                "| Ellenőrizd a kábel bekötését és a port támogatottságát!",
+                gpi_selector, gpi_mode, trigger_source, exc,
+                exc_info=True,
             )
 
     # ------------------------------------------------------------------
@@ -725,11 +763,10 @@ class XimeaCamera(BaseCamera):
                 # Alkalmazzuk az X/Y elmozdulást, tükrözést és elforgatást
                 bgr_image = self.apply_image_transformations(bgr_image)
 
-                # Frame metaadatok: hardveres kamera időbélyeg (ha elérhető), egyébként rendszer óra
-                try:
-                    timestamp = float(self._xi_image.tsSec) + (float(self._xi_image.tsUSec) * 1e-6)
-                except (AttributeError, TypeError):
-                    timestamp = time.perf_counter()
+                # Frame metaadatok: rendszer óra használata, mivel a hardveres órák
+                # (tsSec) aszinkron módban nincsenek szinkronizálva a két kamera között,
+                # ami fals, több másodperces jittert okozna.
+                timestamp = time.perf_counter()
                 self._frame_count += 1
                 fps_frame_count += 1
 
@@ -779,6 +816,19 @@ class XimeaCamera(BaseCamera):
                             exc
                         )
                         slave_timeout_warned = True
+                        
+                        # Visszaesés szoftveres szinkronra
+                        if self._sync_config.get("fallback_to_software_sync", False):
+                            logger.warning("  [SLAVE] Visszaesés szoftveres szinkronizációra (Trigger kikapcsolása)...")
+                            try:
+                                self._cam.stop_acquisition()
+                                self._cam.set_trigger_source("XI_TRG_OFF")
+                                self._cam.start_acquisition()
+                                self._frame_timeout_ms = 1000
+                                self._sync_fallback_active = True
+                                logger.info("  [SLAVE] ✓ Szoftveres szinkronizáció aktív. A kamerák aszinkron módban folytatják.")
+                            except Exception as fb_exc:
+                                logger.error("  [SLAVE] Hiba a szoftveres szinkronra váltáskor: %s", fb_exc)
                     elif self._sync_role != "slave":
                         logger.error(
                             "Képszerzési hiba (%s%s): %s",

@@ -15,12 +15,11 @@ Szinkronizáció módok:
        Mindkét kamerát egymás után olvassuk. ~0.5-2 ms jitter.
 
     2. Hardveres GPIO trigger (sync.enabled: true):
-       A MASTER kamera GPIO OUT1 (Pin 3, Zöld) kimenetén expozíciós pulzust ad ki.
-       A SLAVE kamera GPIO IN1 (Pin 5, Szürke) bemenetén várja ezt a jelet.
-       Kábel: CBL-702-8P-SYNC-5M0, bekötés:
-           MASTER Pin 3 (Zöld/OUT1)     → SLAVE Pin 5 (Szürke/IN1)
-           MASTER Pin 4 (Sárga/OUT-GND) → SLAVE Pin 6 (Rózsaszín/IN-GND)
-           MASTER Pin 7 (Kék/GND)       → SLAVE Pin 7 (Kék/GND)
+       NEM IZOLÁLT MÓD (config.yaml: XI_GPO_PORT2 / XI_GPI_PORT2 = Pin 8 / Piros/INOUT1):
+           MASTER Pin 8 (Piros/INOUT1) ──── SLAVE Pin 8 (Piros/INOUT1)
+           MASTER Pin 7 (Kék/GND)      ──── SLAVE Pin 7 (Kék/GND)
+           A többi 6 eret (Fehér/Barna/Zöld/Sárga/Szürke/Rózsaszín) SZIGETELNI kell!
+       Kábel: CBL-702-8P-SYNC-5M0 (Table 141 alapján)
        Eredmény: <10 µs szinkron jitter.
 """
 

@@ -1,4 +1,16 @@
-PIROS - PIROS
-KÉK - KÉK
+🔬 Multiméter Mérési Terv
+1. mérés: Van-e feszültség a MASTER piros érén?
+Mérési pont: MASTER kábel Piros ér (Pin 8) ↔ Kék ér (Pin 7 = GND)
+Program fut: igen, kamerák megnyitva, expozíció folyamatban
+Elvárt érték: ~3.3V (expozíció alatt HIGH) / ~0V (expozíció között LOW)
+Ha 0V: GPO szoftver konfiguráció nem működik → log-ban keresd a [MASTER] sorokat
 
-Többi szigetelés szabadon.
+
+2. mérés: Átjön-e a SLAVE-re?
+Mérési pont: SLAVE kábel Piros ér (Pin 8) ↔ Kék ér (Pin 7 = GND)
+Elvárt érték: Ugyanaz mint a MASTER-en (azonos jel)
+Ha 0V a SLAVE-en de ~3.3V a MASTER-en: kábel hibás, érintkezési probléma
+
+3. mérés (opcionális): GND közös-e?
+Mérési pont: MASTER Kék ↔ SLAVE Kék
+Elvárt érték: 0 Ω / 0V (azonos potenciálon kell lenniük)

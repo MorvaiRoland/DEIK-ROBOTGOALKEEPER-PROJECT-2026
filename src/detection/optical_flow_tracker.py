@@ -21,6 +21,7 @@ Pipeline:
 import logging
 from typing import Optional, Tuple
 
+# pyrefly: ignore [missing-import]
 import cv2
 import numpy as np
 

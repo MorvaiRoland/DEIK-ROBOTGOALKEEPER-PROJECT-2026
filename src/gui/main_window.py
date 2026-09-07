@@ -648,7 +648,7 @@ class DetectionWorker(threading.Thread):
             while self._running.is_set():
                 snapshot = self._frame_exchange.wait_for_newer(last_sequence)
                 if snapshot is None:
-                    break
+                    continue
                 last_sequence = snapshot.sequence
 
                 # Szürke képek az optikai flow-hoz
