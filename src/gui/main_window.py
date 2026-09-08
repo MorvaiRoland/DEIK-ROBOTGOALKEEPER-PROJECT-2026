@@ -1172,6 +1172,7 @@ class TrackerWorker(QThread):
                     ),
                     "detection_frame_lag": self._snapshot_sequence - state.source_sequence if state else 0,
                     "sync_delta_ms": snapshot.sync_delta_ms,
+                     "hw_sync_enabled": self._cam_manager.is_hw_sync_enabled(),
                 }
                 self.frames_ready.emit(frame_left, frame_right, stats)
 
@@ -2036,7 +2037,8 @@ class MainWindow(QMainWindow):
         self._lbl_diag_fps_pair = QLabel("— FPS")
         self._lbl_diag_fps_det = QLabel("— FPS")
         self._lbl_diag_calib = QLabel("OK (Stereo Calibrated)")
-        self._lbl_diag_sync_delta = QLabel("— ms")
+        self._lbl_diag_sync_mode = QLabel("—")
+        self._lbl_diag_sync_delta = QLabel("—")
 
         cam_form.addRow("Bal Kamera FPS:", self._lbl_diag_fps_l)
         cam_form.addRow("Bal Hőmérséklet:", self._lbl_diag_temp_l)
@@ -2045,7 +2047,8 @@ class MainWindow(QMainWindow):
         cam_form.addRow("Sztereó Pár FPS:", self._lbl_diag_fps_pair)
         cam_form.addRow("YOLO Detektálás FPS:", self._lbl_diag_fps_det)
         cam_form.addRow("Kalibrációs Státusz:", self._lbl_diag_calib)
-        cam_form.addRow("Sztereó Szinkron Jitter:", self._lbl_diag_sync_delta)
+        cam_form.addRow("Szinkronizáció mód:", self._lbl_diag_sync_mode)
+        cam_form.addRow("HW Szinkron Jitter:", self._lbl_diag_sync_delta)
 
         layout.addWidget(cam_grp)
 
@@ -2411,25 +2414,55 @@ class MainWindow(QMainWindow):
             cal_str = "OK (Stereo Calibrated)" if stats.get("calibrated", True) else "HIBA (Nincs Kalibrálva)"
             self._lbl_diag_calib.setText(cal_str)
 
-            # Sztereó szinkron jitter megjelenítése színkódolással
+            # Szinkron mód és jitter megjelenítése
             delta_ms = stats.get("sync_delta_ms", 0.0)
-            if delta_ms < 1.0:
-                # HW GPIO trigger: <1 ms = kiváló szinkron
-                color = "#00e676"   # élénkzöld
-                status = "✓ HW SYNC OK"
+            hw_sync  = stats.get("hw_sync_enabled", False)
+
+            if hasattr(self, "_lbl_diag_sync_mode"):
+                if hw_sync:
+                    mode_color = "#00e676"
+                    mode_text  = "⚡ HW GPIO trigger (opto-izolált)"
+                else:
+                    mode_color = "#ffeb3b"
+                    mode_text  = "💻 Szoftver szinkron"
+                self._lbl_diag_sync_mode.setText(
+                    f"<span style='color:{mode_color}; font-weight:bold;'>{mode_text}</span>"
+                )
+                self._lbl_diag_sync_mode.setTextFormat(Qt.TextFormat.RichText)
+
+            if delta_ms < 0.0:
+                # Sentinel: HW GPIO kalibrálás folyamatban (első 10 frame)
+                self._lbl_diag_sync_delta.setText(
+                    "<span style='color:#ffeb3b; font-weight:bold;'>"
+                    "⏳ Kalibrálás... (első 10 frame)</span>"
+                )
+            elif hw_sync and delta_ms < 1.0:
+                # HW GPIO szinkron OK: µs-ban mutatjuk
+                delta_us = delta_ms * 1000.0
+                if delta_us < 50.0:
+                    color = "#00e676"   # élénkzöld – kiváló
+                    icon  = "✓ HW SYNC OK"
+                else:
+                    color = "#69f0ae"   # világoszöld – jó
+                    icon  = "✓ HW SYNC JÓ"
+                self._lbl_diag_sync_delta.setText(
+                    f"<span style='color:{color}; font-weight:bold;'>"
+                    f"{delta_us:.1f} µs – {icon}</span>"
+                )
             elif delta_ms < 5.0:
-                # Szoftver szinkron tartomány
                 color = "#ffeb3b"   # sárga
-                status = "⚠ Szoftver szinkron"
+                self._lbl_diag_sync_delta.setText(
+                    f"<span style='color:{color}; font-weight:bold;'>"
+                    f"{delta_ms:.3f} ms – ⚠ Szoftver szinkron</span>"
+                )
             else:
-                # Túl nagy jitter – hiba
                 color = "#ff5252"   # piros
-                status = "✗ JITTER HIBA"
-            self._lbl_diag_sync_delta.setText(
-                f"<span style='color:{color}; font-weight:bold;'>"
-                f"{delta_ms:.3f} ms – {status}</span>"
-            )
+                self._lbl_diag_sync_delta.setText(
+                    f"<span style='color:{color}; font-weight:bold;'>"
+                    f"{delta_ms:.3f} ms – ✗ JITTER HIBA</span>"
+                )
             self._lbl_diag_sync_delta.setTextFormat(Qt.TextFormat.RichText)
+
 
             self._lbl_diag_det_status.setText(det_str)
             if stats["pos_valid"]:

@@ -19,10 +19,10 @@ Hardver:
     - Csatlakozás: USB3 (EP-USB3HybridcableU-20 kábel)
     - Szinkron kábel: CBL-702-8P-SYNC-5M0 (M9, 8 pólusú)
 
-Hardveres szinkron bekötés (CBL-702-8P-SYNC-5M0):
-    MASTER kábel Pin 3 (Zöld/OUT1)     → SLAVE kábel Pin 5 (Szürke/IN1)
-    MASTER kábel Pin 4 (Sárga/OUT-GND) → SLAVE kábel Pin 6 (Rózsaszín/IN-GND)
-    MASTER kábel Pin 7 (Kék/GND)       → SLAVE kábel Pin 7 (Kék/GND)
+Hardveres szinkron bekötés (Opto-izolált mód 5V táppal):
+    Külső 5V (+)                       → SLAVE kábel Pin 5 (Szürke/IN1)
+    MASTER kábel Pin 3 (Zöld/OUT1)     → SLAVE kábel Pin 6 (Rózsaszín/IN-GND)
+    MASTER kábel Pin 4 (Sárga/OUT-GND) → Külső 5V GND (-)
 
 Hivatkozások:
     - Ximea xiAPI doku: https://www.ximea.com/support/wiki/apis/Python
@@ -496,7 +496,7 @@ class XimeaCamera(BaseCamera):
         if self._cam is None:
             return
 
-        gpo_selector = self._sync_config.get("gpo_selector", "XI_GPO_PORT2")
+        gpo_selector = self._sync_config.get("gpo_selector", "XI_GPO_PORT1")
         gpo_mode = self._sync_config.get("gpo_mode", "XI_GPO_EXPOSURE_ACTIVE")
 
         try:
@@ -548,7 +548,7 @@ class XimeaCamera(BaseCamera):
         if self._cam is None:
             return
 
-        gpi_selector = self._sync_config.get("gpi_selector", "XI_GPI_PORT2")
+        gpi_selector = self._sync_config.get("gpi_selector", "XI_GPI_PORT1")
         gpi_mode = self._sync_config.get("gpi_mode", "XI_GPI_TRIGGER")
         trigger_source = self._sync_config.get("trigger_source", "XI_TRG_EDGE_RISING")
 
@@ -763,10 +763,20 @@ class XimeaCamera(BaseCamera):
                 # Alkalmazzuk az X/Y elmozdulást, tükrözést és elforgatást
                 bgr_image = self.apply_image_transformations(bgr_image)
 
-                # Frame metaadatok: rendszer óra használata, mivel a hardveres órák
-                # (tsSec) aszinkron módban nincsenek szinkronizálva a két kamera között,
-                # ami fals, több másodperces jittert okozna.
-                timestamp = time.perf_counter()
+                # Frame metaadatok:
+                # - HW GPIO szinkron módban: Ximea belső hardveres timestamp (tsSec + tsUSec)
+                #   Ez a kamera szenzor expozíciós ideje – mindkét kamera ugyanattól a
+                #   HW trigger jeltől indul, így a jitter valóban <10 µs lesz.
+                # - Szoftver szinkron módban: PC rendszeróra (time.perf_counter())
+                #   A két kamera tsSec órája aszinkron – közvetlen összehasonlítás
+                #   fals, több másodperces jittert mutatna.
+                if self._sync_role in ("master", "slave"):
+                    # Ximea hardveres timestamp: tsSec (másodperc) + tsUSec (mikroszekundum)
+                    ts_sec = self._xi_image.tsSec
+                    ts_usec = self._xi_image.tsUSec
+                    timestamp = ts_sec + ts_usec / 1_000_000.0
+                else:
+                    timestamp = time.perf_counter()
                 self._frame_count += 1
                 fps_frame_count += 1
 

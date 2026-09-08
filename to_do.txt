@@ -1,16 +1,13 @@
-🔬 Multiméter Mérési Terv
-1. mérés: Van-e feszültség a MASTER piros érén?
-Mérési pont: MASTER kábel Piros ér (Pin 8) ↔ Kék ér (Pin 7 = GND)
-Program fut: igen, kamerák megnyitva, expozíció folyamatban
-Elvárt érték: ~3.3V (expozíció alatt HIGH) / ~0V (expozíció között LOW)
-Ha 0V: GPO szoftver konfiguráció nem működik → log-ban keresd a [MASTER] sorokat
+1. Lépés: A kamerák összekötése
 
+Fogd meg a Master kamera ZÖLD vezetékét (OUT1).
+Fogd meg a Slave kamera RÓZSASZÍN vezetékét (IN-GND).
+👉 Kösd össze ezt a kettőt egymással. (Forrasztással vagy sorkapoccsal/csokival).
+2. Lépés: Áram adása a fogadónak (Slave)
 
-2. mérés: Átjön-e a SLAVE-re?
-Mérési pont: SLAVE kábel Piros ér (Pin 8) ↔ Kék ér (Pin 7 = GND)
-Elvárt érték: Ugyanaz mint a MASTER-en (azonos jel)
-Ha 0V a SLAVE-en de ~3.3V a MASTER-en: kábel hibás, érintkezési probléma
+Fogd meg a Slave kamera SZÜRKE vezetékét (IN1).
+👉 Kösd rá a külső tápegység +5V (Pozitív / Piros) vezetékére.
+3. Lépés: Az áramkör bezárása (Földelés)
 
-3. mérés (opcionális): GND közös-e?
-Mérési pont: MASTER Kék ↔ SLAVE Kék
-Elvárt érték: 0 Ω / 0V (azonos potenciálon kell lenniük)
+Fogd meg a Master kamera SÁRGA vezetékét (OUT-GND).
+👉 Kösd rá a külső tápegység GND (Negatív / Fekete) vezetékére.

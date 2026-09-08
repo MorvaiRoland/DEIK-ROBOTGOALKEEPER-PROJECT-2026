@@ -105,7 +105,7 @@ camera:
   #
   # EREDMÉNY: <10 µs szinkron jitter (vs. szoftver szinkron ~2 ms jitter)
   sync:
-    enabled: false  # true = HW GPIO trigger | false = szoftver szinkron
+    enabled: true  # true = HW GPIO trigger | false = szoftver szinkron
     master_side: "right"    # "right" = jobb kamera a MASTER (serial: CACAU2517001)
                             # "left"  = bal kamera a MASTER (serial: CACAU2546000)
     # --- MASTER kamera GPIO kimenet (Opto-izolalt, Pin 3 / Zold / OUT1 = PORT1) ---
@@ -248,7 +248,7 @@ ball:
 detection:
   # ----- Modell Választás -----
   # "models/rtdetr-l.engine" → Real-Time Detection Transformer (RT-DETR) TensorRT batch=2 GPU modell
-  model_path: "models/yolov8n.engine
+  model_path: "models/yolov8n.engine"
 
   # COCO modell osztály ID: 32 (sports ball)
   ball_class_id: 32

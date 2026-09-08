@@ -57,7 +57,11 @@ class StereoPair:
     timestamp: float
     pair_id: int
     success: bool
-    sync_delta_ms: float = 0.0  # Szoftver szinkron jitter (ms) – 0 ha hw trigger aktív
+    sync_delta_ms: float = 0.0
+    # sync_delta_ms jelentése:
+    #   -1.0  = HW GPIO mód, clock-offset kalibráció folyamatban
+    #    0.0  = szoftver szinkron (nincs mérés) vagy HW szinkron kivelős jitter
+    #   >0.0  = tényleges jitter ms-ben
 
 
 class CameraManager:
@@ -101,6 +105,19 @@ class CameraManager:
         self._last_pair_time: float = 0.0
         self._measured_fps: float = 0.0
         self._fps_alpha: float = 0.1  # EMA simítás
+
+        # HW GPIO timestamp clock-offset kalibráció
+        # A két Ximea kamera belső tsSec számlálója különböző időpontban indul
+        # és a két kvarc-oszcillátor frekvenciája kicsit eltér (±ppm szinten),
+        # ezért az eltolódás lassan változik (drift). EMA-val követjük.
+        #
+        # _clock_offset : jelenlegi EMA értéke (ts_left - ts_right) mértföldek ben (s)
+        # _CLOCK_EMA_ALPHA: gyors változásra nem reagal (0.005 ≈ 200 frame élértési időállandó)
+        # _CLOCK_CALIB_FRAMES: ennyi frame után tekintjük a kalibrációt végezettnek
+        self._CLOCK_CALIB_FRAMES: int = 10
+        self._CLOCK_EMA_ALPHA:    float = 0.005   # lassan követi a driftet
+        self._clock_offset_samples: list = []      # első N frame inicializáláshoz
+        self._clock_offset: Optional[float] = None # EMA érték (s)
 
         if self._hw_sync_enabled:
             master_sn = (
@@ -242,20 +259,52 @@ class CameraManager:
         # Szinkron jitter mérése: a két frame timestamp különbsége
         sync_delta_ms = 0.0
         if frame_left.success and frame_right.success:
-            sync_delta_ms = abs(frame_left.timestamp - frame_right.timestamp) * 1000.0
-            # HW GPIO szinkron esetén a jitter elvárhatóan <1 ms
-            # Szoftver szinkronnál a küszöb magasabb (~5 ms)
-            jitter_warn_threshold_ms = 1.0 if self._hw_sync_enabled else 5.0
-            if sync_delta_ms > jitter_warn_threshold_ms:
-                sync_mode = "HW GPIO" if self._hw_sync_enabled else "szoftver"
-                logger.warning(
-                    "Sztereo szinkron jitter NAGY [%s mód]: %.1f ms (bal=%.3f, jobb=%.3f) "
-                    "→ 3D pontossági hiba lehetséges!",
-                    sync_mode,
-                    sync_delta_ms,
-                    frame_left.timestamp,
-                    frame_right.timestamp,
-                )
+            raw_delta = frame_left.timestamp - frame_right.timestamp
+
+            if self._hw_sync_enabled:
+                # HW GPIO módban Ximea belső tsSec timestampeket használunk.
+                # A két kamera óráinak eltolódását (clock offset) az első N frame alapján
+                # kalibráljuk, majd a jittert ehhez képest mérjük.
+                if self._clock_offset is None:
+                    # Inicializációs fázis: első N frame egyszerű átlaggá indul az EMA
+                    self._clock_offset_samples.append(raw_delta)
+                    if len(self._clock_offset_samples) >= self._CLOCK_CALIB_FRAMES:
+                        self._clock_offset = float(np.mean(self._clock_offset_samples))
+                        logger.info(
+                            "[HW GPIO] Clock-offset kalibrálva: %.3f ms "
+                            "(%d frame alapján, EMA α=%.3f) – drift követés aktiválva.",
+                            self._clock_offset * 1000.0,
+                            self._CLOCK_CALIB_FRAMES,
+                            self._CLOCK_EMA_ALPHA,
+                        )
+                    sync_delta_ms = -1.0  # sentinel: kalibráció folyamatban
+                else:
+                    # EMA frissítés: lassan követi a kvarc-driftét
+                    self._clock_offset = (
+                        (1.0 - self._CLOCK_EMA_ALPHA) * self._clock_offset
+                        + self._CLOCK_EMA_ALPHA * raw_delta
+                    )
+                    # Tényleges jitter = azonnali eltérés az EMA értéktől
+                    sync_delta_ms = abs(raw_delta - self._clock_offset) * 1000.0
+                    if sync_delta_ms > 1.0:
+                        logger.warning(
+                            "Sztereo szinkron jitter NAGY [HW GPIO mód]: %.3f ms "
+                            "(raw=%.6f, ema_offset=%.3f ms) → 3D pontossági hiba lehetséges!",
+                            sync_delta_ms,
+                            raw_delta * 1000.0,
+                            self._clock_offset * 1000.0,
+                        )
+            else:
+                # Szoftver szinkron: közvetlen különbség (PC időbélyeg, nincs eltolódás)
+                sync_delta_ms = abs(raw_delta) * 1000.0
+                if sync_delta_ms > 5.0:
+                    logger.warning(
+                        "Sztereo szinkron jitter NAGY [szoftver mód]: %.1f ms "
+                        "(bal=%.3f, jobb=%.3f) → 3D pontossági hiba lehetséges!",
+                        sync_delta_ms,
+                        frame_left.timestamp,
+                        frame_right.timestamp,
+                    )
 
         return StereoPair(
             left=frame_left,
@@ -371,12 +420,17 @@ class CameraManager:
         """Az eddig megszerzett frame-párok száma."""
         return self._pair_count
 
+    def is_hw_sync_enabled(self) -> bool:
+        """True ha HW GPIO trigger szinkron aktív (config sync.enabled: true)."""
+        return self._hw_sync_enabled
+
     def get_camera_status(self) -> dict:
         """
         Visszaadja mindkét kamera állapotát monitoring célokra.
 
         Returns:
-            Dict tartalmazza: fps_left, fps_right, temp_left, temp_right, pair_count
+            Dict tartalmazza: fps_left, fps_right, temp_left, temp_right,
+                              pair_count, hw_sync_enabled, clock_offset_ms
         """
         return {
             "fps_left": self._cam_left.get_fps() if self._cam_left else 0.0,
@@ -386,6 +440,11 @@ class CameraManager:
             "pair_fps": self._measured_fps,
             "pair_count": self._pair_count,
             "is_open": self._is_open,
+            "hw_sync_enabled": self._hw_sync_enabled,
+            "clock_offset_ms": (
+                self._clock_offset * 1000.0
+                if self._clock_offset is not None else None
+            ),
         }
 
     # ------------------------------------------------------------------
