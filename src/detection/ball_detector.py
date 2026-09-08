@@ -166,6 +166,17 @@ class BallDetector:
         self._max_aspect_ratio = float(hsv_cfg.get("max_aspect_ratio", 2.50))
         self._max_colored_blob_ratio = float(hsv_cfg.get("max_colored_blob_ratio", 0.95))
 
+        # --- Dinamikus ROI optimalizálás a HSV fallback-hez ---
+        self._dyn_roi_enabled = bool(hsv_cfg.get("dynamic_roi_enabled", True))
+        self._dyn_roi_size = int(hsv_cfg.get("dynamic_roi_size_px", 300))
+        self._dyn_roi_timeout = int(hsv_cfg.get("dynamic_roi_timeout_frames", 5))
+        
+        # Belső állapotváltozók az utolsó ismert pozíciók követéséhez
+        self._last_pos_left: Optional[Tuple[int, int]] = None
+        self._lost_frames_left: int = 999
+        self._last_pos_right: Optional[Tuple[int, int]] = None
+        self._lost_frames_right: int = 999
+
         if self._hsv_enabled:
             logger.info(
                 "HSV szín-ellenőrző AKTÍV: H=[%d-%d], S=[%d-%d], V=[%d-%d], min_ratio=%.0f%%",
@@ -357,9 +368,28 @@ class BallDetector:
         # Ha a YOLO modell nem detektálja a labdát a levegőben (pl. hiányzó talaj-kontextus miatt),
         # a tartalék HSV szín- és körkörösség detektor azonnal megtalálja a rikító narancssárga labdát.
         if not det_left.found:
-            det_left = self._detect_color_blob(left_proc, roi_offset=left_roi_offset)
+            det_left = self._detect_color_blob(
+                left_proc, roi_offset=left_roi_offset,
+                last_pos=self._last_pos_left, lost_frames=self._lost_frames_left
+            )
         if not det_right.found:
-            det_right = self._detect_color_blob(right_proc, roi_offset=right_roi_offset)
+            det_right = self._detect_color_blob(
+                right_proc, roi_offset=right_roi_offset,
+                last_pos=self._last_pos_right, lost_frames=self._lost_frames_right
+            )
+
+        # --- Dinamikus ROI követés frissítése ---
+        if det_left.found:
+            self._last_pos_left = (int(det_left.x), int(det_left.y))
+            self._lost_frames_left = 0
+        else:
+            self._lost_frames_left += 1
+
+        if det_right.found:
+            self._last_pos_right = (int(det_right.x), int(det_right.y))
+            self._lost_frames_right = 0
+        else:
+            self._lost_frames_right += 1
 
         # --- FPS mérés ---
         dt = time.perf_counter() - t_start
@@ -383,7 +413,9 @@ class BallDetector:
     def _detect_color_blob(
         self,
         frame: np.ndarray,
-        roi_offset: Tuple[int, int] = (0, 0)
+        roi_offset: Tuple[int, int] = (0, 0),
+        last_pos: Optional[Tuple[int, int]] = None,
+        lost_frames: int = 999
     ) -> BallDetection:
         """
         Tartalék (Fallback) detektor: narancssárga kör alakú objektumot keres a képen
@@ -395,8 +427,10 @@ class BallDetector:
         Teljesítmény-optimalizált: 50%-os leméretezést használ a gyorsabb CPU feldolgozáshoz.
 
         Args:
-            frame:      BGR kép
-            roi_offset: (x_off, y_off) ROI eltolás a teljes képhez képest
+            frame:       BGR kép
+            roi_offset:  (x_off, y_off) ROI eltolás a teljes képhez képest
+            last_pos:    (x, y) Utolsó ismert globális pozíció a dinamikus ROI-hoz
+            lost_frames: Hány frame óta nem láttuk a labdát
 
         Returns:
             BallDetection: A talált narancssárga labda, vagy found=False ha nincs.
@@ -404,10 +438,36 @@ class BallDetector:
         ox, oy = roi_offset
         h, w = frame.shape[:2]
 
+        # --- Dinamikus ROI kivágás (ha lehetséges) ---
+        crop_ox, crop_oy = 0, 0
+        search_frame = frame
+        used_dynamic_roi = False
+        
+        if self._dyn_roi_enabled and last_pos is not None and lost_frames <= self._dyn_roi_timeout:
+            last_x, last_y = last_pos
+            # A last_pos globális koordináta. Visszaszámoljuk lokálisra a kapott frame-en belül:
+            local_x = int(last_x - ox)
+            local_y = int(last_y - oy)
+            
+            hw = self._dyn_roi_size // 2
+            x1 = max(0, local_x - hw)
+            y1 = max(0, local_y - hw)
+            x2 = min(w, local_x + hw)
+            y2 = min(h, local_y + hw)
+            
+            if x2 > x1 and y2 > y1:
+                search_frame = frame[y1:y2, x1:x2]
+                crop_ox, crop_oy = x1, y1
+                used_dynamic_roi = True
+
+        # A globális offset frissítése, hogy a visszatérési blokk transzparensen működjön
+        ox += crop_ox
+        oy += crop_oy
+
         # --- OPTIMALIZÁCIÓ: 50%-os leméretezés a gyorsabb HSV és morfológiai műveletekhez ---
         scale = 0.5
         inv_scale = 1.0 / scale
-        small_frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+        small_frame = cv2.resize(search_frame, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
 
         # BGR → HSV konverzió
         hsv = cv2.cvtColor(small_frame, cv2.COLOR_BGR2HSV)
@@ -504,8 +564,8 @@ class BallDetector:
             cy = y + oy
 
             logger.debug(
-                "✓ Color-blob tartalék detektálás SIKERES: (%.1f, %.1f) r=%.1f circ=%.2f",
-                cx, cy, radius, circ
+                "✓ Color-blob tartalék detektálás SIKERES: (%.1f, %.1f) r=%.1f circ=%.2f (DynROI: %s)",
+                cx, cy, radius, circ, used_dynamic_roi
             )
             return BallDetection(
                 found=True,
@@ -517,6 +577,12 @@ class BallDetector:
                 bbox=(x1, y1, x2, y2),
                 timestamp=time.perf_counter(),
             )
+
+        # Ha dinamikus ROI-t használtunk, de nem találtuk meg a labdát (pl. hirtelen irányváltás),
+        # akkor "fallback a fallbackben": lefuttatjuk a teljes képre!
+        if used_dynamic_roi:
+            logger.debug("  Dinamikus ROI-ban nem lett meg a labda, teljes képes HSV keresés...")
+            return self._detect_color_blob(frame, roi_offset=roi_offset, last_pos=None)
 
         return BallDetection(found=False)
 

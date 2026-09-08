@@ -15,12 +15,14 @@ Szinkronizáció módok:
        Mindkét kamerát egymás után olvassuk. ~0.5-2 ms jitter.
 
     2. Hardveres GPIO trigger (sync.enabled: true):
-       NEM IZOLÁLT MÓD (config.yaml: XI_GPO_PORT2 / XI_GPI_PORT2 = Pin 8 / Piros/INOUT1):
-           MASTER Pin 8 (Piros/INOUT1) ──── SLAVE Pin 8 (Piros/INOUT1)
-           MASTER Pin 7 (Kék/GND)      ──── SLAVE Pin 7 (Kék/GND)
-           A többi 6 eret (Fehér/Barna/Zöld/Sárga/Szürke/Rózsaszín) SZIGETELNI kell!
-       Kábel: CBL-702-8P-SYNC-5M0 (Table 141 alapján)
-       Eredmény: <10 µs szinkron jitter.
+       Opto-izolált mód (config.yaml: XI_GPO_PORT1 / XI_GPI_PORT1):
+           Külső 5V (+) ──────────────────────── SLAVE Pin 5 (Szürke/IN1)
+           SLAVE Pin 6 (Rózsaszín/IN-GND) ──── MASTER Pin 3 (Zöld/OUT1)
+           MASTER Pin 4 (Sárga/OUT-GND) ────── Külső 5V GND (-)
+       Kábel: CBL-702-8P-SYNC-5M0
+       Mért szinkron minőség (hw_sync_verify.py, 500 frame):
+           STD: 10.8 µs | P95: 0.8 µs | Max: 230 µs
+       Egy 30 m/s sebességű labda: 0.32 mm pozícióhiba → elhanyagolható.
 """
 
 import logging
@@ -106,18 +108,26 @@ class CameraManager:
         self._measured_fps: float = 0.0
         self._fps_alpha: float = 0.1  # EMA simítás
 
-        # HW GPIO timestamp clock-offset kalibráció
+        # HW GPIO timestamp clock-offset kalibráció (EMA-alapú drift követés)
+        # -----------------------------------------------------------------------
         # A két Ximea kamera belső tsSec számlálója különböző időpontban indul
         # és a két kvarc-oszcillátor frekvenciája kicsit eltér (±ppm szinten),
-        # ezért az eltolódás lassan változik (drift). EMA-val követjük.
+        # ezért az eltolódás idővel lassan változik (drift). EMA-val követjük.
         #
-        # _clock_offset : jelenlegi EMA értéke (ts_left - ts_right) mértföldek ben (s)
-        # _CLOCK_EMA_ALPHA: gyors változásra nem reagal (0.005 ≈ 200 frame élértési időállandó)
-        # _CLOCK_CALIB_FRAMES: ennyi frame után tekintjük a kalibrációt végezettnek
-        self._CLOCK_CALIB_FRAMES: int = 10
-        self._CLOCK_EMA_ALPHA:    float = 0.005   # lassan követi a driftet
-        self._clock_offset_samples: list = []      # első N frame inicializáláshoz
+        # Mért referencia (hw_sync_verify.py, 500 frame):
+        #   Offset: ~-3357 ms | Valódi jitter STD: 10.8 µs | P95: 0.8 µs
+        #
+        # _CLOCK_CALIB_FRAMES : ennyi frame átlagából indul az EMA (30 ≈ 0.35 s)
+        # _CLOCK_EMA_ALPHA    : EMA simítás (0.002 ≈ 500 frame időállandó ≈ 5.7 s)
+        # _JITTER_WARN_MS     : ennyi ms felett számol jitter exceeding frame-et
+        # _JITTER_WARN_CONSEC : ennyi egymást követő exceeding frame után logol WARNING
+        self._CLOCK_CALIB_FRAMES:  int   = 30
+        self._CLOCK_EMA_ALPHA:     float = 0.002
+        self._JITTER_WARN_MS:      float = 0.5    # 500 µs küsöb
+        self._JITTER_WARN_CONSEC:  int   = 5      # 5 egymást követő hiba
+        self._clock_offset_samples: list  = []     # inicializációs mintakészlet
         self._clock_offset: Optional[float] = None # EMA érték (s)
+        self._jitter_exceed_streak: int   = 0      # egymást követő exceeding frame-ek
 
         if self._hw_sync_enabled:
             master_sn = (
@@ -262,38 +272,66 @@ class CameraManager:
             raw_delta = frame_left.timestamp - frame_right.timestamp
 
             if self._hw_sync_enabled:
-                # HW GPIO módban Ximea belső tsSec timestampeket használunk.
-                # A két kamera óráinak eltolódását (clock offset) az első N frame alapján
-                # kalibráljuk, majd a jittert ehhez képest mérjük.
-                if self._clock_offset is None:
-                    # Inicializációs fázis: első N frame egyszerű átlaggá indul az EMA
+                # HW GPIO módban: először ellenőrizzük a frame-párosítást (nframe alapján)
+                frame_id_diff = frame_left.frame_id - frame_right.frame_id
+                if frame_id_diff != 0:
+                    # Frame mismatch: a ring buffer aszinkron olvasásakor
+                    # egyik kamera egy frame-mel előrébb/hátrébb van.
+                    # 2.38ms + 9.1ms = 11.5ms = 1 frame periódus → ez a jelenség.
+                    # Ilyenkor az EMA-t NEM frissítjük, a jittert -2.0 sentinellel jelöljük.
+                    sync_delta_ms = -2.0  # frame mismatch sentinel
+                    if abs(frame_id_diff) > 1:
+                        logger.debug(
+                            "[HW GPIO] Frame mismatch (Δid=%+d): "
+                            "bal frame_id=%d, jobb frame_id=%d – "
+                            "ring buffer aszinkron olvasás, 3D kihagyva.",
+                            frame_id_diff,
+                            frame_left.frame_id, frame_right.frame_id,
+                        )
+                elif self._clock_offset is None:
+                    # Inicializációs fázis: első N matched frame átlagából indul az EMA
                     self._clock_offset_samples.append(raw_delta)
                     if len(self._clock_offset_samples) >= self._CLOCK_CALIB_FRAMES:
                         self._clock_offset = float(np.mean(self._clock_offset_samples))
                         logger.info(
-                            "[HW GPIO] Clock-offset kalibrálva: %.3f ms "
-                            "(%d frame alapján, EMA α=%.3f) – drift követés aktiválva.",
+                            "[HW GPIO] ✓ Clock-offset kalibrálva: %.3f ms "
+                            "(%d illesztett frame átlagából, EMA α=%.3f, küszöb=%.1f µs) "
+                            "– drift követés aktiválva.",
                             self._clock_offset * 1000.0,
                             self._CLOCK_CALIB_FRAMES,
                             self._CLOCK_EMA_ALPHA,
+                            self._JITTER_WARN_MS * 1000.0,
                         )
                     sync_delta_ms = -1.0  # sentinel: kalibráció folyamatban
                 else:
-                    # EMA frissítés: lassan követi a kvarc-driftét
+                    # Illesztett frame-pár: EMA frissítés + valódi jitter mérés
                     self._clock_offset = (
                         (1.0 - self._CLOCK_EMA_ALPHA) * self._clock_offset
                         + self._CLOCK_EMA_ALPHA * raw_delta
                     )
-                    # Tényleges jitter = azonnali eltérés az EMA értéktől
                     sync_delta_ms = abs(raw_delta - self._clock_offset) * 1000.0
-                    if sync_delta_ms > 1.0:
-                        logger.warning(
-                            "Sztereo szinkron jitter NAGY [HW GPIO mód]: %.3f ms "
-                            "(raw=%.6f, ema_offset=%.3f ms) → 3D pontossági hiba lehetséges!",
-                            sync_delta_ms,
-                            raw_delta * 1000.0,
-                            self._clock_offset * 1000.0,
-                        )
+
+                    # Egymást követő exceeding frame számláló
+                    if sync_delta_ms > self._JITTER_WARN_MS:
+                        self._jitter_exceed_streak += 1
+                        if self._jitter_exceed_streak >= self._JITTER_WARN_CONSEC:
+                            logger.warning(
+                                "[HW GPIO] Szinkron jitter tartósan NAGY: %.3f ms "
+                                "(%d egymást követő frame, EMA offset=%.3f ms) "
+                                "→ Kábel laza vagy elveszett trigger?",
+                                sync_delta_ms,
+                                self._jitter_exceed_streak,
+                                self._clock_offset * 1000.0,
+                            )
+                    else:
+                        if self._jitter_exceed_streak >= self._JITTER_WARN_CONSEC:
+                            logger.info(
+                                "[HW GPIO] Szinkron jitter visszatért norma tartományba "
+                                "(%.3f ms ≤ %.1f µs küszöb).",
+                                sync_delta_ms,
+                                self._JITTER_WARN_MS * 1000.0,
+                            )
+                        self._jitter_exceed_streak = 0
             else:
                 # Szoftver szinkron: közvetlen különbség (PC időbélyeg, nincs eltolódás)
                 sync_delta_ms = abs(raw_delta) * 1000.0

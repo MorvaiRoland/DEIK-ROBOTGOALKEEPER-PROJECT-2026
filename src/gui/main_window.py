@@ -2430,38 +2430,53 @@ class MainWindow(QMainWindow):
                 )
                 self._lbl_diag_sync_mode.setTextFormat(Qt.TextFormat.RichText)
 
-            if delta_ms < 0.0:
-                # Sentinel: HW GPIO kalibrálás folyamatban (első 10 frame)
+            if abs(delta_ms - (-2.0)) < 0.01:
+                # Frame mismatch sentinel: ring buffer aszinkron olvasás
+                # A HW trigger rendben van, csak a frame_id-k nem egyeznek
+                self._lbl_diag_sync_delta.setText(
+                    "<span style='color:#90a4ae; font-weight:bold;'>"
+                    "↔ Frame illesztés... (ring buffer)</span>"
+                )
+            elif delta_ms < 0.0:
+                # Sentinel: HW GPIO clock-offset kalibráció folyamatban (első 30 frame)
                 self._lbl_diag_sync_delta.setText(
                     "<span style='color:#ffeb3b; font-weight:bold;'>"
-                    "⏳ Kalibrálás... (első 10 frame)</span>"
+                    "⏳ Kalibrálás... (első 30 illesztett frame)</span>"
                 )
-            elif hw_sync and delta_ms < 1.0:
-                # HW GPIO szinkron OK: µs-ban mutatjuk
+            elif hw_sync:
+                # HW GPIO szinkron – µs-ban mutatjuk, mért referencia: STD=10.8µs
                 delta_us = delta_ms * 1000.0
-                if delta_us < 50.0:
-                    color = "#00e676"   # élénkzöld – kiváló
-                    icon  = "✓ HW SYNC OK"
-                else:
-                    color = "#69f0ae"   # világoszöld – jó
+                if delta_us < 100.0:
+                    color = "#00e676"
+                    icon  = "✓ HW SYNC KIVÁLÓ"
+                elif delta_us < 500.0:
+                    color = "#69f0ae"
                     icon  = "✓ HW SYNC JÓ"
+                elif delta_ms < 2.0:
+                    color = "#ffeb3b"
+                    icon  = "⚠ USB LATENCIA ZAJ"
+                else:
+                    color = "#ff5252"
+                    icon  = "✗ SZINKRON HIBA"
                 self._lbl_diag_sync_delta.setText(
                     f"<span style='color:{color}; font-weight:bold;'>"
                     f"{delta_us:.1f} µs – {icon}</span>"
                 )
             elif delta_ms < 5.0:
-                color = "#ffeb3b"   # sárga
+                color = "#ffeb3b"
                 self._lbl_diag_sync_delta.setText(
                     f"<span style='color:{color}; font-weight:bold;'>"
                     f"{delta_ms:.3f} ms – ⚠ Szoftver szinkron</span>"
                 )
             else:
-                color = "#ff5252"   # piros
+                color = "#ff5252"
                 self._lbl_diag_sync_delta.setText(
                     f"<span style='color:{color}; font-weight:bold;'>"
                     f"{delta_ms:.3f} ms – ✗ JITTER HIBA</span>"
                 )
             self._lbl_diag_sync_delta.setTextFormat(Qt.TextFormat.RichText)
+
+
 
 
             self._lbl_diag_det_status.setText(det_str)

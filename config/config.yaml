@@ -31,12 +31,12 @@ camera:
 
   # Natív képfelbontás (Sony IMX174: 1936 × 1216)
   resolution:
-    width: 1936
-    height: 1216
+    width: 1440 
+    height: 1080
 
   # Célzott frame rate (a kamera max. 165 FPS-t tud)
   # Javasolt: 100 FPS – gyors mozgáshoz elegendő, USB sávszélesség stabil
-  fps: 144
+  fps: 130
 
   # Zársebesség mikroszekundumban (1/fps * 1e6 a max mozgásblur nélkül)
   # 100 FPS-nél: max 10000 µs; javasolt: 2000-5000 µs erős megvilágításnál
@@ -240,6 +240,11 @@ ball:
     v_min: 60      # Minimum világosság
     v_max: 255
     min_orange_ratio: 0.08   # A labda területének legalább 8%-a narancssárga legyen
+    
+    # --- Dinamikus ROI optimalizálás a HSV fallback-hez ---
+    dynamic_roi_enabled: true
+    dynamic_roi_size_px: 300       # Keresési ablak mérete az utolsó pozíció körül (300x300 pixel)
+    dynamic_roi_timeout_frames: 5  # Hány frame után essünk vissza teljes képre, ha nincs meg
 
 
 # =============================================================================

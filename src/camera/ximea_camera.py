@@ -336,6 +336,39 @@ class XimeaCamera(BaseCamera):
         self._cam.set_gain(self._gain_db)
         logger.debug("  Erősítés: %.1f dB", self._gain_db)
 
+        # --- Képfelbontás (ROI - Region of Interest) ---
+        # Ha csökkentjük a felbontást, megnő a maximális FPS az USB sávszélesség korlátai miatt.
+        res_cfg = self._config.get("resolution", {})
+        target_w = res_cfg.get("width", 1936)
+        target_h = res_cfg.get("height", 1216)
+
+        # Ximea IMX174 szenzor szabályok:
+        # Width increment: 16, Height increment: 2, OffsetX increment: 8, OffsetY increment: 2
+        width = (target_w // 16) * 16
+        height = (target_h // 2) * 2
+
+        # Automatikus középre igazítás a 1936x1216-os natív szenzoron
+        offset_x = (1936 - width) // 2
+        offset_y = (1216 - height) // 2
+        
+        offset_x = (offset_x // 8) * 8
+        offset_y = (offset_y // 2) * 2
+
+        try:
+            # Szigorú sorrend: először offseteket lenullázni, utána méret, utána új offset
+            self._cam.set_offsetX(0)
+            self._cam.set_offsetY(0)
+            self._cam.set_width(width)
+            self._cam.set_height(height)
+            self._cam.set_offsetX(offset_x)
+            self._cam.set_offsetY(offset_y)
+            logger.info(
+                "  ROI beállítva: %dx%d (Offset: %d, %d)", 
+                width, height, offset_x, offset_y
+            )
+        except Exception as exc:
+            logger.warning("  ROI beállítási hiba: %s", exc)
+
         # --- Képformátum ---
         # A formatum megváltoztathatja a lehetséges frame rate-et, ezért ezt
         # a sávszélesség- és FPS-paraméterek ELŐTT kell beállítani.
@@ -775,8 +808,14 @@ class XimeaCamera(BaseCamera):
                     ts_sec = self._xi_image.tsSec
                     ts_usec = self._xi_image.tsUSec
                     timestamp = ts_sec + ts_usec / 1_000_000.0
+                    # nframe: Ximea hardveres frame-számláló, szinkronban a triggerrel.
+                    # MASTER és SLAVE ugyanazt a nframe értéket kapja azonos trigger-cikluson,
+                    # így frame_id alapján pontos frame-párosítás végezhető.
+                    hw_frame_id = int(self._xi_image.nframe)
                 else:
                     timestamp = time.perf_counter()
+                    hw_frame_id = None  # szoftver módban nincs közös HW számláló
+
                 self._frame_count += 1
                 fps_frame_count += 1
 
@@ -784,7 +823,7 @@ class XimeaCamera(BaseCamera):
                 frame = CameraFrame(
                     image=bgr_image,
                     timestamp=timestamp,
-                    frame_id=self._frame_count,
+                    frame_id=hw_frame_id if hw_frame_id is not None else self._frame_count,
                     success=True,
                 )
 
