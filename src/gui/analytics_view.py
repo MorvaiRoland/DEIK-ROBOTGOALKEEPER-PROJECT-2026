@@ -2,11 +2,13 @@
 DEIK Robot Foci Kapus – Analitika & Vizuális Grafikonok Dashboard (PyQt6)
 ========================================================================
 
-Statisztikai és elemző felület:
+Bővített statisztikai és elemző felület:
   - Labda Sebesség & Trajektória Grafikon (km/h, Z magasság)
   - 2D Lövési Hőtérkép (Goal 2D Heatmap)
   - Szektoros eloszlási mutatók (Bal felső, Jobb felső, Bal alsó, Jobb alsó, Közép)
+  - Részletes lövési lista (sebesség, becsapódási idő, szektor)
   - Munkamenet Exportálás (CSV & HTML Riport)
+  - Munkamenet Perzisztencia (automatikus JSON Lines mentés)
   - Téma-tudatos (Dark Mode & Light Mode)
 """
 
@@ -51,20 +53,22 @@ class GoalHeatmapWidget(QWidget):
         self._goal_h = goal_h_mm
         self._dark = False
         self._grid = [[0 for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)]
-        self._shots: List[Tuple[float, float, float, bool]] = []
+        self._shots: List[dict] = []
         self.setMinimumSize(360, 220)
 
     def set_dark(self, dark: bool) -> None:
         self._dark = dark
         self.update()
 
-    def set_shots(self, shots: List[Tuple[float, float, float, bool]]) -> None:
+    def set_shots(self, shots: List[dict]) -> None:
         """Frissíti a hőtérkép rácsát a kapott lövés listával."""
         self._shots = list(shots)
         self._grid = [[0 for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)]
 
         half_w = self._goal_w / 2.0
-        for sx, sy, conf, in_g in self._shots:
+        for shot in self._shots:
+            sx = shot.get("x_mm", 0.0)
+            sy = shot.get("y_mm", 0.0)
             norm_x = (sx + half_w) / self._goal_w
             norm_y = sy / self._goal_h
 
@@ -217,6 +221,7 @@ class SpeedPlotWidget(QWidget):
 class AnalyticsDashboardWidget(QWidget):
     """
     Összesített Analitika Dashboard: Hőtérkép, Görbék, Statisztikai Táblázat, CSV/HTML Export.
+    Bővített adatmodell: sebesség, becsapódási idő, szektor rögzítése lövésenként.
     """
 
     def __init__(self, config: dict, parent: Optional[QWidget] = None):
@@ -228,7 +233,8 @@ class AnalyticsDashboardWidget(QWidget):
         self._goal_w = float(geo_cfg.get("goal_width_mm", 4000.0))
         self._goal_h = float(geo_cfg.get("goal_height_mm", 2000.0))
 
-        self._shot_records: List[Tuple[float, float, float, bool]] = []
+        # Bővített lövési rekordok (dict lista)
+        self._shot_records: List[dict] = []
         self._build_ui()
 
     def set_dark(self, dark: bool) -> None:
@@ -237,12 +243,46 @@ class AnalyticsDashboardWidget(QWidget):
         self._speed_plot.set_dark(dark)
         self._apply_theme()
 
-    def add_shot_event(self, x_mm: float, y_mm: float, conf: float, in_goal: bool, speed_kmh: float = 45.0) -> None:
-        """Hozzáad egy új lövés eseményt az analitikai gyűjteményhez."""
-        self._shot_records.append((x_mm, y_mm, conf, in_goal))
+    def add_shot_event(
+        self,
+        x_mm: float,
+        y_mm: float,
+        conf: float,
+        in_goal: bool,
+        speed_kmh: float = 0.0,
+        time_to_impact_s: float = 0.0,
+        sector: str = "",
+    ) -> None:
+        """Hozzáad egy új lövés eseményt a bővített analitikai gyűjteményhez."""
+        if not sector:
+            sector = self._determine_sector(x_mm, y_mm)
+
+        record = {
+            "timestamp": time.strftime("%H:%M:%S"),
+            "timestamp_full": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "x_mm": x_mm,
+            "y_mm": y_mm,
+            "conf": conf,
+            "in_goal": in_goal,
+            "speed_kmh": speed_kmh,
+            "time_to_impact_s": time_to_impact_s,
+            "sector": sector,
+        }
+        self._shot_records.append(record)
         self._heatmap.set_shots(self._shot_records)
         self._speed_plot.add_data_point(speed_kmh, y_mm)
         self._update_table_and_stats()
+        return record  # Visszaadjuk a session manager számára
+
+    def get_shot_records(self) -> List[dict]:
+        """Visszaadja az összes lövési rekordot."""
+        return list(self._shot_records)
+
+    def _determine_sector(self, x_mm: float, y_mm: float) -> str:
+        """Meghatározza a becsapódási szektort az X,Y koordináták alapján."""
+        horiz = "BAL" if x_mm < -600 else ("JOBB" if x_mm > 600 else "KÖZÉP")
+        vert = "FELSŐ" if y_mm > 1000 else "ALSÓ"
+        return f"{horiz} {vert}"
 
     def _build_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -311,20 +351,28 @@ class AnalyticsDashboardWidget(QWidget):
 
         self._lbl_stat_total = QLabel("0 db")
         self._lbl_stat_ingoal = QLabel("0 db (0%)")
-        self._lbl_stat_saved = QLabel("0 db (0%)")
+        self._lbl_stat_avg_speed = QLabel("— km/h")
+        self._lbl_stat_max_speed = QLabel("— km/h")
+        self._lbl_stat_avg_time = QLabel("— mp")
         self._lbl_stat_sectors = QLabel("BAL: 0 | KÖZÉP: 0 | JOBB: 0")
+        self._lbl_stat_session = QLabel("Munkamenet: 0 perc")
 
         stats_form.addRow("Összes Lövés:", self._lbl_stat_total)
         stats_form.addRow("Kaput Talált:", self._lbl_stat_ingoal)
-        stats_form.addRow("Robot Védések:", self._lbl_stat_saved)
+        stats_form.addRow("Átlag Sebesség:", self._lbl_stat_avg_speed)
+        stats_form.addRow("Max Sebesség:", self._lbl_stat_max_speed)
+        stats_form.addRow("Átlag Becsap. Idő:", self._lbl_stat_avg_time)
         stats_form.addRow("Zóna Eloszlás:", self._lbl_stat_sectors)
+        stats_form.addRow("Munkamenet:", self._lbl_stat_session)
 
         # Lövési Lista Táblázat
         table_grp = QGroupBox("Legutóbbi Lövések Részletes Listája")
         table_box = QVBoxLayout(table_grp)
 
-        self._table = QTableWidget(0, 5)
-        self._table.setHorizontalHeaderLabels(["Időpont", "X (mm)", "Y (mm)", "Konfidencia", "Eredmény"])
+        self._table = QTableWidget(0, 7)
+        self._table.setHorizontalHeaderLabels([
+            "Időpont", "X (mm)", "Y (mm)", "Sebesség", "Becsap. Idő", "Szektor", "Eredmény"
+        ])
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.verticalHeader().setVisible(False)
         table_box.addWidget(self._table)
@@ -337,27 +385,57 @@ class AnalyticsDashboardWidget(QWidget):
 
     def _update_table_and_stats(self) -> None:
         n = len(self._shot_records)
-        in_g = sum(1 for _, _, _, ig in self._shot_records if ig)
+        in_g = sum(1 for r in self._shot_records if r.get("in_goal", False))
         pct = (in_g / n * 100.0) if n > 0 else 0.0
+
+        # Sebességek és becsapódási idők
+        speeds = [r.get("speed_kmh", 0.0) for r in self._shot_records if r.get("speed_kmh", 0.0) > 0]
+        times = [r.get("time_to_impact_s", 0.0) for r in self._shot_records if r.get("time_to_impact_s", 0.0) > 0]
+
+        # Szektor statisztika
+        left = sum(1 for r in self._shot_records if "BAL" in r.get("sector", ""))
+        center = sum(1 for r in self._shot_records if "KÖZÉP" in r.get("sector", ""))
+        right = sum(1 for r in self._shot_records if "JOBB" in r.get("sector", ""))
 
         self._lbl_stat_total.setText(f"{n} db")
         self._lbl_stat_ingoal.setText(f"{in_g} db ({pct:.0f}%)")
 
-        # Frissítjük a táblázatot
+        if speeds:
+            self._lbl_stat_avg_speed.setText(f"{sum(speeds)/len(speeds):.1f} km/h")
+            self._lbl_stat_max_speed.setText(f"{max(speeds):.1f} km/h")
+        else:
+            self._lbl_stat_avg_speed.setText("— km/h")
+            self._lbl_stat_max_speed.setText("— km/h")
+
+        if times:
+            self._lbl_stat_avg_time.setText(f"{sum(times)/len(times):.3f} mp")
+        else:
+            self._lbl_stat_avg_time.setText("— mp")
+
+        self._lbl_stat_sectors.setText(f"BAL: {left} | KÖZÉP: {center} | JOBB: {right}")
+
+        # Táblázat frissítés
         self._table.setRowCount(0)
-        for i, (sx, sy, conf, ig) in enumerate(reversed(self._shot_records)):
+        for i, rec in enumerate(reversed(self._shot_records)):
             self._table.insertRow(i)
-            t_str = time.strftime("%H:%M:%S")
+            ig = rec.get("in_goal", False)
             res_str = "KAPUBAN ✓" if ig else "MELLÉ ✕"
 
-            self._table.setItem(i, 0, QTableWidgetItem(t_str))
-            self._table.setItem(i, 1, QTableWidgetItem(f"{sx:+.0f}"))
-            self._table.setItem(i, 2, QTableWidgetItem(f"{sy:.0f}"))
-            self._table.setItem(i, 3, QTableWidgetItem(f"{conf * 100:.0f}%"))
+            self._table.setItem(i, 0, QTableWidgetItem(rec.get("timestamp", "—")))
+            self._table.setItem(i, 1, QTableWidgetItem(f"{rec.get('x_mm', 0):+.0f}"))
+            self._table.setItem(i, 2, QTableWidgetItem(f"{rec.get('y_mm', 0):.0f}"))
+
+            spd = rec.get("speed_kmh", 0.0)
+            self._table.setItem(i, 3, QTableWidgetItem(f"{spd:.1f} km/h" if spd > 0 else "—"))
+
+            tti = rec.get("time_to_impact_s", 0.0)
+            self._table.setItem(i, 4, QTableWidgetItem(f"{tti:.3f} mp" if tti > 0 else "—"))
+
+            self._table.setItem(i, 5, QTableWidgetItem(rec.get("sector", "—")))
 
             item_res = QTableWidgetItem(res_str)
             item_res.setForeground(QColor("#10B981") if ig else QColor("#EF4444"))
-            self._table.setItem(i, 4, item_res)
+            self._table.setItem(i, 6, item_res)
 
     @pyqtSlot()
     def _clear_analytics(self) -> None:
@@ -375,9 +453,21 @@ class AnalyticsDashboardWidget(QWidget):
             try:
                 with open(path, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["Timestamp", "X_mm", "Y_mm", "Confidence", "InGoal"])
-                    for sx, sy, conf, ig in self._shot_records:
-                        writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), sx, sy, conf, ig])
+                    writer.writerow([
+                        "Timestamp", "X_mm", "Y_mm", "Confidence", "InGoal",
+                        "Speed_kmh", "TimeToImpact_s", "Sector"
+                    ])
+                    for rec in self._shot_records:
+                        writer.writerow([
+                            rec.get("timestamp_full", ""),
+                            rec.get("x_mm", 0.0),
+                            rec.get("y_mm", 0.0),
+                            rec.get("conf", 0.0),
+                            rec.get("in_goal", False),
+                            rec.get("speed_kmh", 0.0),
+                            rec.get("time_to_impact_s", 0.0),
+                            rec.get("sector", ""),
+                        ])
                 QMessageBox.information(self, "Export Sikeres", f"Lövési adatok mentve:\n{path}")
             except Exception as e:
                 QMessageBox.critical(self, "Export Hiba", str(e))
@@ -391,8 +481,13 @@ class AnalyticsDashboardWidget(QWidget):
         if path:
             try:
                 n = len(self._shot_records)
-                in_g = sum(1 for _, _, _, ig in self._shot_records if ig)
+                in_g = sum(1 for r in self._shot_records if r.get("in_goal", False))
                 pct = (in_g / n * 100.0) if n > 0 else 0.0
+                speeds = [r.get("speed_kmh", 0.0) for r in self._shot_records if r.get("speed_kmh", 0.0) > 0]
+                avg_spd = sum(speeds) / len(speeds) if speeds else 0.0
+                max_spd = max(speeds) if speeds else 0.0
+                times_list = [r.get("time_to_impact_s", 0.0) for r in self._shot_records if r.get("time_to_impact_s", 0.0) > 0]
+                avg_time = sum(times_list) / len(times_list) if times_list else 0.0
 
                 html = f"""<!DOCTYPE html>
 <html>
@@ -403,27 +498,70 @@ class AnalyticsDashboardWidget(QWidget):
         body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #0B0F17; color: #F8FAFC; margin: 20px; }}
         h1 {{ color: #4ADE80; border-bottom: 2px solid #10B981; padding-bottom: 8px; }}
         .card {{ background: #151D2A; border: 1px solid #26334D; padding: 15px; border-radius: 8px; margin-bottom: 15px; }}
+        .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }}
+        .stat-item {{ background: #1E293B; padding: 12px; border-radius: 6px; text-align: center; }}
+        .stat-value {{ font-size: 24px; font-weight: 900; color: #4ADE80; }}
+        .stat-label {{ font-size: 11px; color: #94A3B8; margin-top: 4px; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
         th, td {{ padding: 8px 12px; border: 1px solid #26334D; text-align: left; }}
         th {{ background: #0F5132; color: white; }}
         tr:nth-child(even) {{ background: #1E293B; }}
+        .in-goal {{ color: #4ADE80; font-weight: bold; }}
+        .missed {{ color: #EF4444; font-weight: bold; }}
     </style>
 </head>
 <body>
     <h1>⚽ DEIK Robot Kapus – Edzés & Munkamenet Riport</h1>
     <div class="card">
         <h3>Dátum: {time.strftime('%Y-%m-%d %H:%M:%S')}</h3>
-        <p><b>Összes Lövés:</b> {n} db</p>
-        <p><b>Kaput Talált:</b> {in_g} db ({pct:.1f}%)</p>
+        <div class="stats-grid">
+            <div class="stat-item">
+                <div class="stat-value">{n}</div>
+                <div class="stat-label">ÖSSZES LÖVÉS</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">{in_g} ({pct:.0f}%)</div>
+                <div class="stat-label">KAPUT TALÁLT</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">{avg_spd:.1f} km/h</div>
+                <div class="stat-label">ÁTLAG SEBESSÉG</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">{max_spd:.1f} km/h</div>
+                <div class="stat-label">MAX SEBESSÉG</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">{avg_time:.3f} mp</div>
+                <div class="stat-label">ÁTLAG BECSAPÓDÁSI IDŐ</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value">{n - in_g}</div>
+                <div class="stat-label">MELLÉ MENT</div>
+            </div>
+        </div>
     </div>
     <div class="card">
         <h3>Lövési Lista</h3>
         <table>
-            <tr><th>#</th><th>X (mm)</th><th>Y (mm)</th><th>Konfidencia</th><th>Eredmény</th></tr>
+            <tr><th>#</th><th>Időpont</th><th>X (mm)</th><th>Y (mm)</th><th>Sebesség</th><th>Becsap. Idő</th><th>Szektor</th><th>Eredmény</th></tr>
 """
-                for idx, (sx, sy, conf, ig) in enumerate(self._shot_records, 1):
-                    res_txt = "KAPUBAN" if ig else "MELLÉ"
-                    html += f"<tr><td>{idx}</td><td>{sx:+.0f}</td><td>{sy:.0f}</td><td>{conf*100:.0f}%</td><td>{res_txt}</td></tr>\n"
+                for idx, rec in enumerate(self._shot_records, 1):
+                    ig = rec.get("in_goal", False)
+                    res_cls = "in-goal" if ig else "missed"
+                    res_txt = "KAPUBAN ✓" if ig else "MELLÉ ✕"
+                    spd = rec.get("speed_kmh", 0.0)
+                    tti = rec.get("time_to_impact_s", 0.0)
+                    html += (
+                        f"<tr><td>{idx}</td>"
+                        f"<td>{rec.get('timestamp', '')}</td>"
+                        f"<td>{rec.get('x_mm', 0):+.0f}</td>"
+                        f"<td>{rec.get('y_mm', 0):.0f}</td>"
+                        f"<td>{spd:.1f} km/h</td>"
+                        f"<td>{tti:.3f} mp</td>"
+                        f"<td>{rec.get('sector', '')}</td>"
+                        f"<td class=\"{res_cls}\">{res_txt}</td></tr>\n"
+                    )
 
                 html += """        </table>
     </div>

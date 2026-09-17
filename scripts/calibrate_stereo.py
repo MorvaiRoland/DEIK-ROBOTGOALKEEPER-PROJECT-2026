@@ -205,6 +205,22 @@ def main() -> None:
 
     # Sakktábla paraméterek
     cb_cfg = stereo_cfg.get("chessboard", {})
+
+    # A parancssori kalibráló CSAK klasszikus sakktáblát támogat. A config ChArUco
+    # táblát is megadhat (board_type: "charuco") – ilyenkor a findChessboardCorners
+    # nem talál sarkokat, ezért itt egyértelműen leállunk a néma hibázás helyett.
+    board_type = str(cb_cfg.get("board_type", "chessboard")).lower()
+    if board_type == "charuco":
+        logger.error(
+            "A config ChArUco táblát ad meg (board_type: 'charuco'), amit ez a "
+            "parancssori szkript NEM támogat.\n"
+            "  → Használd a GUI kalibrációs varázslót (Sztereó Kalibráció gomb), "
+            "az teljes ChArUco támogatással rendelkezik,\n"
+            "  → vagy állítsd a config board_type-ot 'chessboard'-ra klasszikus "
+            "sakktáblához, és add meg az inner_corners_x/y + square_size_mm értékeket."
+        )
+        sys.exit(1)
+
     pattern_size = (
         int(cb_cfg.get("inner_corners_x", 9)),
         int(cb_cfg.get("inner_corners_y", 6))
@@ -354,6 +370,16 @@ def main() -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Ha a kimeneti fájlban már van mért világ-transzformáció (calibrate_world.py-ból),
+    # azt megőrizzük – különben egy újrakalibrálás elveszítené a korábbi munkát.
+    preserved = {}
+    if output_path.exists():
+        with np.load(str(output_path)) as existing:
+            if "R_world_cam" in existing.files and "t_world_cam" in existing.files:
+                preserved["R_world_cam"] = existing["R_world_cam"]
+                preserved["t_world_cam"] = existing["t_world_cam"]
+                logger.info("Meglévő világ-transzformáció megőrizve az újrakalibrálás során.")
+
     np.savez(
         str(output_path),
         K1=result["K1"], D1=result["D1"],
@@ -367,6 +393,7 @@ def main() -> None:
         image_width=result["image_width"],
         image_height=result["image_height"],
         baseline_mm=result["baseline_mm"],
+        **preserved,
     )
 
     # --- Eredmény kiírása ---

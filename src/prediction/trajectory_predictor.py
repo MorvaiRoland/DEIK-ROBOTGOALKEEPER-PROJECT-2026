@@ -695,11 +695,32 @@ class TrajectoryPredictor:
         """
         if not self._kalman_initialized:
             return 0.0, 0.0, 0.0
+        # Álló labda holtsáv: ha az utóbbi mérések térbeli szórása kicsi, a labda
+        # gyakorlatilag egy helyben áll, így a triangulációs zajból származó
+        # "fantom" sebességet nullázzuk (különben álló labdán is m/s-ot mutat).
+        if self._is_stationary():
+            return 0.0, 0.0, 0.0
         return (
             float(self._kalman_state[3]),
             float(self._kalman_state[4]),
             float(self._kalman_state[5]),
         )
+
+    def _is_stationary(self, window: int = 8, spread_thresh_mm: float = 60.0) -> bool:
+        """True, ha az utóbbi mérések térbeli szórása minden tengelyen kicsi."""
+        n = len(self._history)
+        if n < 4:
+            return False
+        pts = list(self._history)[-min(window, n):]
+        xs = [p.x for p in pts]
+        ys = [p.y for p in pts]
+        zs = [p.z for p in pts]
+        spread = max(
+            max(xs) - min(xs),
+            max(ys) - min(ys),
+            max(zs) - min(zs),
+        )
+        return spread < spread_thresh_mm
 
     def get_trajectory_history_mm(self) -> List[Tuple[float, float, float]]:
         """

@@ -185,27 +185,76 @@ class GoalViewWidget(QWidget):
         time_to_impact_s: float,
         in_goal: bool = False,
     ) -> None:
+        """Kompatibilitási API: csak aktív, már megerősített lövést frissít."""
         if x_mm is not None and time_to_impact_s >= 0.0:
-            self._impact_x_mm       = x_mm
-            self._impact_y_mm       = y_mm
-            self._impact_conf       = confidence
-            self._time_to_impact_s  = time_to_impact_s
-            self._in_goal           = in_goal
-
-            # Robot kapus cél dőlésszöge az előrejelzett becsapódásra
-            half_w = self._goal_width_mm / 2.0
-            norm_x = max(-1.0, min(1.0, x_mm / half_w))
-            self._gk_target_tilt_deg = norm_x * 55.0
-            self._gk_state = "MOVING"
+            self.update_shot(x_mm, y_mm, confidence, time_to_impact_s, in_goal)
         else:
-            if self._impact_x_mm is not None:
-                self._save_to_history()
-            self._impact_x_mm      = None
-            self._impact_y_mm      = None
-            self._impact_conf      = 0.0
-            self._time_to_impact_s = 0.0
-            self._in_goal          = False
-        
+            self.cancel_active_shot()
+
+    def begin_shot(
+        self,
+        x_mm: float,
+        y_mm: Optional[float],
+        confidence: float,
+        time_to_impact_s: float,
+        in_goal: bool,
+    ) -> None:
+        """Megkezd egy ShotDetector által megerősített lövést."""
+        if self._impact_x_mm is None:
+            self._set_active_impact(x_mm, y_mm, confidence, time_to_impact_s, in_goal)
+
+    def update_shot(
+        self,
+        x_mm: float,
+        y_mm: Optional[float],
+        confidence: float,
+        time_to_impact_s: float,
+        in_goal: bool,
+    ) -> None:
+        """Frissíti a folyamatban lévő, már megerősített lövés becsapódását."""
+        if self._impact_x_mm is not None:
+            self._set_active_impact(x_mm, y_mm, confidence, time_to_impact_s, in_goal)
+
+    def finish_shot(self) -> None:
+        """Egyszer rögzíti az aktív megerősített lövést a történetben."""
+        if self._impact_x_mm is None:
+            return
+        self._save_to_history()
+        self._clear_active_impact()
+
+    def cancel_active_shot(self) -> None:
+        """Törli a folyamatban lévő lövést történet- és számlálófrissítés nélkül."""
+        self._clear_active_impact()
+
+    def _set_active_impact(
+        self,
+        x_mm: float,
+        y_mm: Optional[float],
+        confidence: float,
+        time_to_impact_s: float,
+        in_goal: bool,
+    ) -> None:
+        self._impact_x_mm = x_mm
+        self._impact_y_mm = y_mm
+        self._impact_conf = confidence
+        self._time_to_impact_s = time_to_impact_s
+        self._in_goal = in_goal
+
+        half_w = self._goal_width_mm / 2.0
+        norm_x = max(-1.0, min(1.0, x_mm / half_w))
+        self._gk_target_tilt_deg = norm_x * 55.0
+        self._gk_state = "MOVING"
+        self._update_hud_status_label()
+        self.update()
+
+    def _clear_active_impact(self) -> None:
+        self._impact_x_mm = None
+        self._impact_y_mm = None
+        self._impact_conf = 0.0
+        self._time_to_impact_s = 0.0
+        self._in_goal = False
+        self._gk_target_tilt_deg = 0.0
+        self._gk_state = "IDLE"
         self._update_hud_status_label()
         self.update()
 

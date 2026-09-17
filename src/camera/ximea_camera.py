@@ -34,7 +34,7 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Optional
+from typing import Optional, Tuple
 
 # pyrefly: ignore [missing-import]
 import cv2
@@ -339,33 +339,76 @@ class XimeaCamera(BaseCamera):
         # --- Képfelbontás (ROI - Region of Interest) ---
         # Ha csökkentjük a felbontást, megnő a maximális FPS az USB sávszélesség korlátai miatt.
         res_cfg = self._config.get("resolution", {})
-        target_w = res_cfg.get("width", 1936)
-        target_h = res_cfg.get("height", 1216)
+        target_w = int(res_cfg.get("width", 1936))
+        target_h = int(res_cfg.get("height", 1216))
 
-        # Ximea IMX174 szenzor szabályok:
-        # Width increment: 16, Height increment: 2, OffsetX increment: 8, OffsetY increment: 2
-        width = (target_w // 16) * 16
-        height = (target_h // 2) * 2
+        # A szenzor tényleges korlátait és lépésközeit a XiAPI-tól kérdezzük le,
+        # NEM hardcode-oljuk (a 1936x1216 csak fallback). Így a középre igazítás és
+        # a kerekítés mindig a valódi hardverhez igazodik.
+        def _q(getter, default):
+            try:
+                return int(getter())
+            except Exception:
+                return int(default)
 
-        # Automatikus középre igazítás a 1936x1216-os natív szenzoron
-        offset_x = (1936 - width) // 2
-        offset_y = (1216 - height) // 2
-        
-        offset_x = (offset_x // 8) * 8
-        offset_y = (offset_y // 2) * 2
+        native_w   = _q(self._cam.get_width_maximum, 1936)
+        native_h   = _q(self._cam.get_height_maximum, 1216)
+        w_inc      = max(_q(self._cam.get_width_increment, 16), 1)
+        h_inc      = max(_q(self._cam.get_height_increment, 2), 1)
+        ox_inc     = max(_q(self._cam.get_offsetX_increment, 8), 1)
+        oy_inc     = max(_q(self._cam.get_offsetY_increment, 2), 1)
 
-        try:
-            # Szigorú sorrend: először offseteket lenullázni, utána méret, utána új offset
+        # Kért méret lépésközre kerekítve és a szenzor méretére vágva.
+        width  = min((target_w // w_inc) * w_inc, native_w)
+        height = min((target_h // h_inc) * h_inc, native_h)
+
+        # Középre igazítás, offset lépésközre kerekítve.
+        offset_x = ((native_w - width)  // 2 // ox_inc) * ox_inc
+        offset_y = ((native_h - height) // 2 // oy_inc) * oy_inc
+
+        def _apply_roi() -> Tuple[int, int, int, int]:
+            # KLAMP-BIZTOS SORREND:
+            # 1) offsetek nullázása + teljes szenzorra tágítás → megszünteti a
+            #    korábbi futásból bennmaradt ROI/offset okozta levágást (1688 bug),
+            # 2) majd a kért méret, végül az új offset.
             self._cam.set_offsetX(0)
             self._cam.set_offsetY(0)
+            self._cam.set_width(native_w)
+            self._cam.set_height(native_h)
+
             self._cam.set_width(width)
             self._cam.set_height(height)
             self._cam.set_offsetX(offset_x)
             self._cam.set_offsetY(offset_y)
-            logger.info(
-                "  ROI beállítva: %dx%d (Offset: %d, %d)", 
-                width, height, offset_x, offset_y
+            return (
+                self._cam.get_width(), self._cam.get_height(),
+                self._cam.get_offsetX(), self._cam.get_offsetY(),
             )
+
+        try:
+            actual_w, actual_h, actual_ox, actual_oy = _apply_roi()
+
+            # Ha a XiAPI mégis lekorlátozta a méretet, egyszer újrapróbáljuk
+            # (a teljes szenzorra tágítás után a második kör már mindig sikerül).
+            if (actual_w, actual_h) != (width, height):
+                logger.warning(
+                    "  ROI első kísérlet eltért (kért=%dx%d, kapott=%dx%d) – újrapróbálom...",
+                    width, height, actual_w, actual_h,
+                )
+                actual_w, actual_h, actual_ox, actual_oy = _apply_roi()
+
+            if (actual_w, actual_h) != (width, height):
+                logger.error(
+                    "  ROI KÉNYSZERÍTÉS SIKERTELEN: kért=%dx%d, tényleges=%dx%d "
+                    "(Offset: %d, %d)! A kamera hardveresen lekorlátozza a méretet. "
+                    "Húzd ki/dugd vissza a kamerát (USB power-cycle) és indítsd újra.",
+                    width, height, actual_w, actual_h, actual_ox, actual_oy,
+                )
+            else:
+                logger.info(
+                    "  ROI beállítva: %dx%d (Offset: %d, %d) [szenzor: %dx%d]",
+                    actual_w, actual_h, actual_ox, actual_oy, native_w, native_h,
+                )
         except Exception as exc:
             logger.warning("  ROI beállítási hiba: %s", exc)
 
