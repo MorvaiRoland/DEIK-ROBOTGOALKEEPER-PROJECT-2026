@@ -28,12 +28,14 @@ CONFIG = {
 
 
 def _impact() -> ImpactPrediction:
-    return ImpactPrediction(x_mm=0.0, y_mm=800.0, time_to_impact_s=0.2, valid=True)
+    return ImpactPrediction(x_mm=0.0, y_mm=800.0, time_to_impact_s=0.2, valid=True, in_goal=True)
 
 
 def _feed_valid_shot(detector: ShotDetector):
+    # Z egészen a (default) confirm_z_mm=1500 mm-es küszöb alá esik, különben a
+    # megerősítés sosem történik meg – lásd ShotDetector.update() confirm_z_mm gate.
     status = None
-    for index, z_mm in enumerate((9000.0, 8500.0, 8000.0, 7500.0, 7000.0, 6500.0)):
+    for index, z_mm in enumerate((9000.0, 7360.0, 5720.0, 4080.0, 2440.0, 800.0)):
         status = detector.update(z_mm, index * 0.1, _impact(), True)
     return status
 
@@ -96,3 +98,28 @@ def test_confirmed_shot_is_finished_once_at_goal_plane() -> None:
     cooldown = detector.update(500.0, 0.7, _impact(), True)
     assert not cooldown.confirmed
     assert not cooldown.finished
+
+
+def test_kinematic_shot_confirms_without_in_goal_prediction() -> None:
+    # Gyors lövésnél a ballisztikus in_goal-predikció megbízhatatlan (sztereó Y-hiba),
+    # ezért alapból (require_impact_in_goal=False) a mozgás alapján erősítünk meg.
+    detector = ShotDetector(CONFIG)
+    detector.arm_next_shot()
+    off_target = ImpactPrediction(x_mm=0.0, y_mm=-3000.0, time_to_impact_s=0.2, valid=True, in_goal=False)
+    status = None
+    for index, z_mm in enumerate((9000.0, 7360.0, 5720.0, 4080.0, 2440.0, 800.0)):
+        status = detector.update(z_mm, index * 0.1, off_target, True)
+    assert status.confirmed
+
+
+def test_require_in_goal_flag_restores_strict_gate() -> None:
+    strict_cfg = {"shot_detection": {**CONFIG["shot_detection"], "require_impact_in_goal": True}}
+    detector = ShotDetector(strict_cfg)
+    detector.arm_next_shot()
+    off_target = ImpactPrediction(x_mm=0.0, y_mm=-3000.0, time_to_impact_s=0.2, valid=True, in_goal=False)
+    status = None
+    for index, z_mm in enumerate((9000.0, 7360.0, 5720.0, 4080.0, 2440.0, 800.0)):
+        status = detector.update(z_mm, index * 0.1, off_target, True)
+    assert not status.confirmed
+    assert status.armed
+

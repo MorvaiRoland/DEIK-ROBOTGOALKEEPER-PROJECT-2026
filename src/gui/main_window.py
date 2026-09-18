@@ -347,6 +347,11 @@ class ShotStatus:
     active: bool = False
     finished: bool = False
     armed: bool = False
+    # True pontosan azon a frame-en, ahol a valódi mozgás (rúgás) elindult – ekkor
+    # a TrajectoryPredictor historikáját is nullázni kell (lásd DetectionWorker.run()),
+    # különben az állás közben felgyűlt zajos minták elrontják az impact-predikció
+    # sebességbecslését (és ezzel az extrapolált X/Y-t).
+    motion_started_event: bool = False
 
 
 class ShotDetector:
@@ -380,7 +385,29 @@ class ShotDetector:
         self._finish_z_mm = float(cfg.get("finish_z_mm", 700.0))
         self._max_missing_frames = int(cfg.get("max_missing_frames", 4))
         self._cooldown_s = float(cfg.get("cooldown_s", 2.5))
+        # Amíg a labda az élesítés után lényegében mozdulatlanul áll az indítózónában
+        # (a kezelő még célra áll/hátralép), egy-egy mintavétel közötti Z-elmozdulásnak
+        # ennél gyorsabbnak kell lennie (mm/s), hogy "valódi lövés indulásaként" számítson.
+        self._motion_start_speed_mm_s = float(cfg.get("motion_start_speed_mm_s", 600.0))
+        # Egyetlen zajos képkocka (pl. egy pixelnyi sugárugrás) is adhat ennél nagyobb
+        # pillanatnyi sebességet állás közben, ezért ennyi EGYMÁST KÖVETŐ mintának kell
+        # a küszöb felett lennie, mielőtt tényleges lövés-indulásként fogadjuk el.
+        self._motion_confirm_frames = int(cfg.get("motion_confirm_frames", 3))
+        # Az `impact.in_goal` néhány mm-es zajingadozás miatt kereten belülről kívülre
+        # villódzhat a kapu vonala közelében; ennyi másodpercig "emlékszünk" az utolsó
+        # in_goal=True pillanatra, hogy egy köztes zajos frame ne buktassa el a megerősítést.
+        self._in_goal_grace_s = float(cfg.get("in_goal_grace_s", 0.2))
+        # A ballisztikus becsapódás-predikció (impact.in_goal) a labda Y-koordinátáján
+        # múlik, ami gyors lövésnél a sztereó Y-hiba (epipoláris eltérés, mozgáselmosódás)
+        # miatt megbízhatatlan – X és Z stabil, Y sokszor több méterrel elcsúszik.
+        # Ezért alapból a lövést a MOZGÁSA (gyors, konzisztens, kapu felé tartó, a kaput
+        # ténylegesen elérő) alapján erősítjük meg, NEM a törékeny Y-predikción. Ha true,
+        # a régi, szigorú in_goal feltételt is megköveteljük.
+        self._require_impact_in_goal = bool(cfg.get("require_impact_in_goal", False))
         self._samples: list[tuple[float, float]] = []
+        self._motion_started = False
+        self._motion_streak = 0
+        self._last_in_goal_true_time = float("-inf")
         self._state = self.ARMED if not self._manual_arm_required else self.DISARMED
         self._last_shot_time = float("-inf")
         self._missing_frames = 0
@@ -398,14 +425,20 @@ class ShotDetector:
         """Élesíti a következő, indítózónából érkező lövést."""
         self._state = self.ARMED
         self._samples.clear()
+        self._motion_started = False
+        self._motion_streak = 0
         self._missing_frames = 0
+        self._last_in_goal_true_time = float("-inf")
         logger.info("Lövésdetektor ÉLESÍTVE: indítózónából érkező lövésre vár.")
 
     def disarm(self) -> None:
         """Megszakítja a függőben lévő lövésfigyelést és törli a mintákat."""
         self._state = self.DISARMED
         self._samples.clear()
+        self._motion_started = False
+        self._motion_streak = 0
         self._missing_frames = 0
+        self._last_in_goal_true_time = float("-inf")
         logger.info("Lövésdetektor hatástalanítva.")
 
     def update(
@@ -450,12 +483,49 @@ class ShotDetector:
 
         if self._state == self.ARMED:
             if not (self._launch_z_min_mm <= z_mm <= self._launch_z_max_mm):
+                logger.debug(
+                    "Lövésdetektor: Z=%.0f mm kívül esik az indítózónán [%.0f, %.0f] mm",
+                    z_mm, self._launch_z_min_mm, self._launch_z_max_mm,
+                )
                 return self._status()
             self._state = self.TRACKING
             self._samples = [(timestamp_s, z_mm)]
+            self._motion_started = False
+            self._motion_streak = 0
+            self._last_in_goal_true_time = float("-inf")
+            logger.debug("Lövésdetektor: TRACKING elindult Z=%.0f mm-nél", z_mm)
             return self._status()
 
-        # TRACKING: a ténylegesen mért, időbélyegzett Z-pontokból döntünk.
+        # TRACKING: amíg a labda lényegében mozdulatlanul áll az indítózónában
+        # (élesítés után, a rúgás előtt), az egyetlen bázispontot frissítjük ahelyett,
+        # hogy a mozdulatlan mintákat felhalmoznánk. Enélkül ezek a régi, közel nulla
+        # sebességű minták bekerülnének a 30-elemes csúszóablakba és összekeverednének
+        # a tényleges lövés adataival, jelentősen belassítva/megakadályozva az
+        # R²/sebesség-illesztés konvergenciáját, mire a labda eléri a kaput.
+        if not self._motion_started:
+            prev_t, prev_z = self._samples[-1] if self._samples else (timestamp_s, z_mm)
+            dt = timestamp_s - prev_t
+            inst_vz = (z_mm - prev_z) / dt if dt > 1e-6 else 0.0
+            if inst_vz > -self._motion_start_speed_mm_s:
+                self._motion_streak = 0
+                self._samples = [(timestamp_s, z_mm)]
+                return self._status()
+            # A küszöb feletti pillanatnyi sebesség önmagában lehet egyetlen zajos
+            # képkocka is (pl. sugárbecslési ugrás állás közben) – csak akkor fogadjuk
+            # el valódi lövés-indulásnak, ha ez több egymást követő mintán is fennáll.
+            self._samples.append((timestamp_s, z_mm))
+            self._motion_streak += 1
+            if self._motion_streak < self._motion_confirm_frames:
+                return self._status()
+            self._motion_started = True
+            logger.debug(
+                "Lövésdetektor: valódi elmozdulás észlelve (v=%.0f mm/s, Z=%.0f mm), "
+                "regresszió indul",
+                inst_vz, z_mm,
+            )
+            return self._status(motion_started_event=True)
+
+        # a ténylegesen mért, időbélyegzett Z-pontokból döntünk.
         self._samples.append((timestamp_s, z_mm))
         self._samples = self._samples[-30:]
         if len(self._samples) < self._min_samples:
@@ -474,36 +544,88 @@ class ShotDetector:
         r2 = 1.0 - float(np.sum((z_values - z_pred) ** 2)) / ss_tot if ss_tot > 1e-9 else 0.0
         traveled_mm = self._samples[0][1] - z_mm
 
-        if (impact is None or not impact.valid or not impact.in_goal or
-                z_mm > self._confirm_z_mm or
-                vz_trend > -self._min_speed_mm_s or
-                r2 < self._min_r2 or
-                traveled_mm < self._min_travel_mm):
+        impact_in_goal_now = bool(impact is not None and impact.valid and impact.in_goal)
+        if impact_in_goal_now:
+            self._last_in_goal_true_time = timestamp_s
+        # Rövid türelmi ablak: a becsapódás-predikció a kapuvonal közelében néhány
+        # mm-es zajra is be-kilebeghet a kereten, ezért egy köztes False frame miatt
+        # nem utasítjuk el a lövést, ha nagyon nemrég még in_goal=True volt.
+        impact_in_goal_recent = impact_in_goal_now or (
+            timestamp_s - self._last_in_goal_true_time <= self._in_goal_grace_s
+        )
+
+        # --- Megerősítés ---
+        # ROBUST KINEMATIKA (X/Z-alapú, gyors lövésnél is megbízható): a labda a kapu
+        # felé, elég gyorsan, konzisztensen (magas R²) mozgott, elég nagy utat tett meg,
+        # és ténylegesen elérte a kapu közelségét (confirm_z). Ezek a jelek a logokban
+        # minden valódi lövésnél teljesülnek.
+        kinematics_ok = (
+            z_mm <= self._confirm_z_mm and
+            vz_trend <= -self._min_speed_mm_s and
+            r2 >= self._min_r2 and
+            traveled_mm >= self._min_travel_mm
+        )
+        # A ballisztikus in_goal-predikció a labda Y-koordinátáján múlik, ami gyors
+        # lövésnél a sztereó Y-hiba miatt gyakran több méterrel elcsúszik (a logokban
+        # X és Z helyes, Y viszont -2000..-45000 mm közé ugrik). Ezért alapból NEM
+        # kötjük ehhez a megerősítést; csak ha require_impact_in_goal explicit be van
+        # kapcsolva a configban.
+        impact_gate_ok = (not self._require_impact_in_goal) or (
+            impact is not None and impact.valid and impact_in_goal_recent
+        )
+
+        if not (kinematics_ok and impact_gate_ok):
+            logger.debug(
+                "Lövésdetektor: TRACKING elutasítva Z=%.0f mm, vz=%.0f mm/s (min=%.0f), "
+                "R²=%.2f (min=%.2f), dz=%.0f mm (min=%.0f), impact=%s, "
+                "impact_xy=(X=%s, Y=%s), in_goal=%s, in_goal_kell=%s, confirm_z=%.0f mm",
+                z_mm, vz_trend, self._min_speed_mm_s, r2, self._min_r2,
+                traveled_mm, self._min_travel_mm,
+                impact.valid if impact is not None else None,
+                f"{impact.x_mm:+.0f}" if impact is not None else None,
+                f"{impact.y_mm:.0f}" if impact is not None else None,
+                impact_in_goal_recent,
+                self._require_impact_in_goal,
+                self._confirm_z_mm,
+            )
             return self._status()
 
         self._state = self.CONFIRMED
         self._missing_frames = 0
         self._last_shot_time = timestamp_s
-        logger.info(
-            "LÖVÉS MEGERŐSÍTVE ✓: Z=%0.f→%0.f mm, dz=%0.f mm, vz=%0.f mm/s, R²=%.2f, "
-            "impact=(X=%+.0f mm, Y=%.0f mm, t=%.3f s)",
-            self._samples[0][1], z_mm, traveled_mm, vz_trend, r2,
-            impact.x_mm, impact.y_mm, impact.time_to_impact_s,
-        )
+        if impact is not None and impact.valid:
+            logger.info(
+                "LÖVÉS MEGERŐSÍTVE ✓: Z=%0.f→%0.f mm, dz=%0.f mm, vz=%0.f mm/s, R²=%.2f, "
+                "impact=(X=%+.0f mm, Y=%.0f mm, t=%.3f s)",
+                self._samples[0][1], z_mm, traveled_mm, vz_trend, r2,
+                impact.x_mm, impact.y_mm, impact.time_to_impact_s,
+            )
+        else:
+            logger.info(
+                "LÖVÉS MEGERŐSÍTVE ✓ (kinematika): Z=%0.f→%0.f mm, dz=%0.f mm, "
+                "vz=%0.f mm/s, R²=%.2f (nincs érvényes becsapódás-predikció)",
+                self._samples[0][1], z_mm, traveled_mm, vz_trend, r2,
+            )
         return self._status(confirmed=True)
 
-    def _status(self, confirmed: bool = False, finished: bool = False) -> ShotStatus:
+    def _status(
+        self, confirmed: bool = False, finished: bool = False, motion_started_event: bool = False
+    ) -> ShotStatus:
         return ShotStatus(
             confirmed=confirmed,
             active=self._state == self.CONFIRMED,
             finished=finished,
             armed=self.is_armed,
+            motion_started_event=motion_started_event,
         )
 
     def reset(self) -> None:
         """Visszaállítja az állapotot."""
         self._samples.clear()
+        self._motion_started = False
+        self._motion_streak = 0
         self._missing_frames = 0
+        self._last_in_goal_true_time = float("-inf")
         self._state = self.ARMED if not self._manual_arm_required else self.DISARMED
         self._last_shot_time = float("-inf")
 
@@ -760,10 +882,16 @@ class DetectionWorker(threading.Thread):
                 detection.both_found = left_det.found and right_det.found
 
                 pos_3d: Optional[np.ndarray] = None
+                # True sztereó trianguláció ténye (a labdaméret-alapú mono tartalék NEM az).
+                # A ShotDetector Z-trendje ehhez a zászlóhoz kötött, mert a mono Z
+                # (lásd lejjebb) néhány pixelnyi sugárzaj mellett is több ezer mm-t
+                # ugorhat, ami tönkreteszi az R²/sebesség-illesztést.
+                stereo_pos_valid = False
                 if left_valid and right_valid:
                     pos_3d = triangulator.triangulate(
                         left_point=(left_x, left_y), right_point=(right_x, right_y)
                     )
+                    stereo_pos_valid = pos_3d is not None
 
                 # --- Mono mélység validáció és fuzízió ---
                 if pos_3d is not None and detection.left.radius > 0:
@@ -859,20 +987,28 @@ class DetectionWorker(threading.Thread):
 
                 # --- Lövés detektálás ---
                 # Csak valódi lövésnél (gyors, kapu felé tartó labda) hozzuk létre a lövés eseményt.
-                # A Z-trend követéséhez elég, ha BÁRMELYIK kamera megbízhatóan detektál (Mono-fallback
-                # Z-t is elfogadjuk) – a logmérés szerint lövésenként hol a bal, hol a jobb kamera esik
-                # ideiglenesen 0.30 konfidencia alá, ezért egyik oldalt sem szabad kizárólagosan
-                # megkövetelni. A végső megerősítéshez viszont továbbra is valódi `impact` (mindkét
-                # kamerás triangulációból) szükséges (lásd lejjebb).
+                # A trajektória-előrejelzőhöz (fentebb) a mono-fallback Z-t is elfogadjuk, hogy a
+                # kirajzolt pálya ne szakadjon meg. A ShotDetector Z-trendjéhez viszont KIZÁRÓLAG
+                # a valódi sztereó trianguláció Z-jét adjuk tovább (stereo_pos_valid) – a mono
+                # tartalék (labda-sugár alapú) Z pár pixelnyi sugárzajra is ezer mm-es ugrásokat
+                # produkál (lásd MonoDepthEstimator.fallback_z), ami megöli az R²/sebesség
+                # illesztést és soha nem engedi megerősíteni a lövést. Egy ilyen frame egyszerűen
+                # kimarad a mintákból (mint egy hiányzó detektálás), nem szakítja meg a TRACKING-et.
                 left_ok = left_det.found and left_det.confidence >= 0.30 and left_det.radius >= 8.0
                 right_ok = right_det.found and right_det.confidence >= 0.30 and right_det.radius >= 8.0
-                quality_ok = pos_3d is not None and (left_ok or right_ok)
+                quality_ok = pos_3d is not None and stereo_pos_valid and (left_ok or right_ok)
                 shot_status = shot_detector.update(
                     z_mm=float(pos_3d[2]) if pos_3d is not None else None,
                     timestamp_s=snapshot.timestamp,
                     impact=impact,
                     pos_3d_valid=quality_ok,
                 )
+                if shot_status.motion_started_event:
+                    # A rúgás előtti állás közben felgyűlt zajos minták kikerülnek a
+                    # predikcióból – a sebességbecslés (és vele az impact X/Y) a
+                    # valódi lövés első mintájától indul újra, tisztán.
+                    predictor.reset()
+                    logger.debug("TrajectoryPredictor újraindítva a lövés-indulás pillanatában")
 
                 self._result_exchange.publish(
                     TrackingState(
@@ -2509,51 +2645,53 @@ class MainWindow(QMainWindow):
             self._lbl_time.setText(f"{impact.time_to_impact_s:.3f} mp")
             zone_text = self._determine_defense_zone(impact.x_mm, impact.y_mm)
             self._lbl_zone.setText(zone_text)
-
-            if hasattr(self, "_goal_view") and self._goal_view:
-                if shot_confirmed_event:
-                    self._goal_view.begin_shot(
-                        impact.x_mm, impact.y_mm, impact.confidence,
-                        impact.time_to_impact_s, impact.in_goal,
-                    )
-                elif shot_active:
-                    self._goal_view.update_shot(
-                        impact.x_mm, impact.y_mm, impact.confidence,
-                        impact.time_to_impact_s, impact.in_goal,
-                    )
-            if hasattr(self, "_goal_view_full") and self._goal_view_full:
-                if shot_confirmed_event:
-                    self._goal_view_full.begin_shot(
-                        impact.x_mm, impact.y_mm, impact.confidence,
-                        impact.time_to_impact_s, impact.in_goal,
-                    )
-                elif shot_active:
-                    self._goal_view_full.update_shot(
-                        impact.x_mm, impact.y_mm, impact.confidence,
-                        impact.time_to_impact_s, impact.in_goal,
-                    )
-            if hasattr(self, "_analytics_view") and self._analytics_view:
-                # Csak valódi lövésnél (ShotDetector által megerősített) rögzítünk eseményt!
-                # Cooldown nélkül egy lövés >100 frame-en át rögzítődne.
-                if shot_confirmed_event:
-                    speed_kmh = (stats.get("speed_ms", 12.5) or 12.5) * 3.6
-                    sector = self._determine_defense_zone(impact.x_mm, impact.y_mm)
-                    record = self._analytics_view.add_shot_event(
-                        x_mm=impact.x_mm,
-                        y_mm=impact.y_mm,
-                        conf=impact.confidence,
-                        in_goal=impact.in_goal,
-                        speed_kmh=speed_kmh,
-                        time_to_impact_s=impact.time_to_impact_s,
-                        sector=sector,
-                    )
-                    # Munkamenet perzisztencia: automatikus mentés
-                    if record and hasattr(self, '_session_manager'):
-                        self._session_manager.save_shot(record)
         else:
             self._lbl_impact.setText("—")
             self._lbl_time.setText("—")
             self._lbl_zone.setText("— KÖZÉP —")
+
+        # --- Lövés-jelölő pozíció a kapu-vizualizációhoz ---
+        # A ballisztikus impact.y_mm (magasság) gyors lövésnél megbízhatatlan a sztereó
+        # Y-hiba miatt, ezért ha nincs érvényes predikció, a MÉRT pozícióra esünk vissza
+        # (az X = bal/jobb stabil), a magasságot pedig a kapu tartományába szorítjuk, hogy
+        # a jelölő a kereten belül, a helyes oldalon jelenjen meg.
+        goal_w = float(self._config.get("geometry", {}).get("goal_width_mm", 4000.0))
+        goal_h = float(self._config.get("geometry", {}).get("goal_height_mm", 2000.0))
+        shot_pt: Optional[Tuple[float, float, float, float, bool]] = None
+        if impact and impact.valid:
+            sy_disp = min(max(impact.y_mm, 0.0), goal_h)
+            shot_pt = (impact.x_mm, sy_disp, impact.confidence,
+                       impact.time_to_impact_s, impact.in_goal)
+        elif (shot_confirmed_event or shot_active) and stats.get("pos_valid"):
+            sx = float(stats.get("x_3d", 0.0))
+            sy = min(max(float(stats.get("y_3d", goal_h / 2.0)), 0.0), goal_h)
+            shot_pt = (sx, sy, 0.5, 0.0, abs(sx) <= goal_w / 2.0)
+
+        if shot_pt is not None:
+            px_mm, py_mm, pconf, pt_s, p_in_goal = shot_pt
+            for gv in (getattr(self, "_goal_view", None), getattr(self, "_goal_view_full", None)):
+                if gv is None:
+                    continue
+                if shot_confirmed_event:
+                    gv.begin_shot(px_mm, py_mm, pconf, pt_s, p_in_goal)
+                elif shot_active:
+                    gv.update_shot(px_mm, py_mm, pconf, pt_s, p_in_goal)
+            if shot_confirmed_event and hasattr(self, "_analytics_view") and self._analytics_view:
+                # Csak valódi lövésnél (ShotDetector által megerősített) rögzítünk eseményt!
+                speed_kmh = (stats.get("speed_ms", 12.5) or 12.5) * 3.6
+                sector = self._determine_defense_zone(px_mm, py_mm)
+                record = self._analytics_view.add_shot_event(
+                    x_mm=px_mm,
+                    y_mm=py_mm,
+                    conf=pconf,
+                    in_goal=p_in_goal,
+                    speed_kmh=speed_kmh,
+                    time_to_impact_s=pt_s,
+                    sector=sector,
+                )
+                # Munkamenet perzisztencia: automatikus mentés
+                if record and hasattr(self, '_session_manager'):
+                    self._session_manager.save_shot(record)
 
         if shot_finished:
             if hasattr(self, "_goal_view") and self._goal_view:

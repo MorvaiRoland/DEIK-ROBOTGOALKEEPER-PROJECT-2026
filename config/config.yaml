@@ -202,6 +202,12 @@ geometry:
   # ----- Kapu mérete -----
   goal_width_mm: 4000.0       # 4 méter széles
   goal_height_mm: 2000.0      # 2 méter magas
+  # A becsapódás-predikció a labda KÖZÉPPONTJÁT vizsgálja a "kapun belül" döntésnél.
+  # A labda sugara (~105 mm) + mérési/extrapolációs zaj miatt ennyi tűréssel engedjük
+  # be a kereten (kapufák/talaj/keresztléc) kívülre eső középpontokat is, különben
+  # egy súroló/talajon guruló, ténylegesen kapuba tartó lövés Y≈0-nál (vagy egy
+  # kapufa mellett) hamis negatívnak (in_goal=False) számítana.
+  goal_margin_mm: 150.0
 
   # ----- Pálya -----
   # A lövő helye (ahol a labdát rúgják)
@@ -385,15 +391,24 @@ shot_detection:
   launch_z_max_mm: 12000.0
 
   # A lövés csak elég hosszú, következetes és gyors kapu felé mozgás után igazolódik.
-  min_travel_mm: 2000.0
+  min_travel_mm: 1000.0
   min_samples: 6
   min_speed_mm_s: 4000.0
-  min_r2: 0.85
+  min_r2: 0.50
 
   # A labdának ténylegesen el kell érnie ezt a Z vonalat (mm) mielőtt a lövés megerősítésre kerül.
   # Ez kiszűri a hamis detektálásokat ahol a rendszer „lát" egy lövést ami még messze van,
   # de soha nem éri el ténylegesen a kaput. Alapértelmezés: 1500 mm (1.5 méter a kaputól).
-  confirm_z_mm: 3000.0
+  confirm_z_mm: 5000.0
+
+  # A lövés MEGERŐSÍTÉSE alapból a labda MOZGÁSÁN múlik (gyors, konzisztens, kapu felé
+  # tartó, a kaput ténylegesen elérő) – NEM a ballisztikus becsapódás-predikción.
+  # Ok: a predikció "kapun belül" (in_goal) döntése a labda Y-koordinátáján múlik, ami
+  # gyors lövésnél a sztereó Y-hiba (epipoláris eltérés, mozgáselmosódás) miatt sokszor
+  # több méterrel elcsúszik (a logban X és Z helyes, Y viszont -2000..-45000 mm közé ugrik),
+  # így minden valódi lövést tévesen elutasítana. Ha true, a régi szigorú in_goal feltételt
+  # is megköveteljük (csak akkor kapcsold be, ha a magasság-mérés már megbízható).
+  require_impact_in_goal: false
 
   # A lövés a kapu síkjánál vagy több elveszett mérés után lezárul.
   finish_z_mm: 700.0

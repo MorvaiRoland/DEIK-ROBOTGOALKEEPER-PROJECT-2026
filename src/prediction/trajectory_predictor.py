@@ -173,6 +173,11 @@ class TrajectoryPredictor:
         geo_cfg = config.get("geometry", {})
         self._goal_width_mm = float(geo_cfg.get("goal_width_mm", 4000.0))
         self._goal_height_mm = float(geo_cfg.get("goal_height_mm", 2000.0))
+        # A becsapódási pont a labda KÖZÉPPONTJA, nem a felülete – egy, a kapufa/talaj
+        # mellett súroló lövésnél a labda széle már bent lehet, míg a középpontja még
+        # kívül számol. A labda sugara (jellemzően ~105 mm) + mérési/extrapolációs zaj
+        # miatt ennyi tűréssel engedjük be a kereten kívülre eső középpontokat is.
+        self._goal_margin_mm = float(geo_cfg.get("goal_margin_mm", 150.0))
 
         # Előrejelzési beállítások
         self._min_points = int(self._pred_cfg.get("min_points_for_prediction", 3))
@@ -392,11 +397,11 @@ class TrajectoryPredictor:
         pred.confidence = self._compute_confidence(pred)
         pred.valid = pred.confidence >= self._min_confidence
 
-        # Kapu keretén belül?
+        # Kapu keretén belül? (labdasugárnyi + zaj tűréssel, lásd goal_margin_mm)
         if pred.valid:
             pred.in_goal = (
-                abs(pred.x_mm) <= self._goal_width_mm / 2.0 and
-                0 <= pred.y_mm <= self._goal_height_mm
+                abs(pred.x_mm) <= self._goal_width_mm / 2.0 + self._goal_margin_mm and
+                -self._goal_margin_mm <= pred.y_mm <= self._goal_height_mm + self._goal_margin_mm
             )
 
         self._last_prediction = pred
