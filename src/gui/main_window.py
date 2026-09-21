@@ -1364,6 +1364,9 @@ class TrackerWorker(QThread):
                     "detection_frame_lag": self._snapshot_sequence - state.source_sequence if state else 0,
                     "sync_delta_ms": snapshot.sync_delta_ms,
                      "hw_sync_enabled": self._cam_manager.is_hw_sync_enabled(),
+                    # Bal/jobb kamera detektálási konfidencia (telemetria rekordhoz)
+                    "conf_left": float(left_det.confidence) if left_det.found else 0.0,
+                    "conf_right": float(right_det.confidence) if right_det.found else 0.0,
                 }
                 self.frames_ready.emit(frame_left, frame_right, stats)
 
@@ -1519,6 +1522,21 @@ class MainWindow(QMainWindow):
         self._auto_arm_enabled = bool(config.get("shot_detection", {}).get("auto_rearm", False))
         self._last_handled_shot_sequence = -1
         self._shot_arm_time: float = 0.0
+        # ── Lövés telemetria követés ─────────────────────────────────────────
+        # Az időpont, amikor a ShotDetector megerősítette a lövést
+        self._shot_confirm_time: float = 0.0
+        # Az aktuátor utolsó parancsvételének időpontja és célpozíciója
+        self._last_goalkeeper_cmd_time: float = 0.0
+        self._last_goalkeeper_x_mm: float = 0.0
+        self._last_goalkeeper_y_mm: float = 0.0
+        self._last_goalkeeper_speed_m_s: float = 2.5
+        # Lövés-specifikus pipeline idők (az utolsó megerősítésnél tárolt stats-ból)
+        self._last_shot_detection_latency_ms: float = 0.0
+        self._last_shot_pipeline_ms: float = 0.0
+        self._last_shot_vx: float = 0.0
+        self._last_shot_vy: float = 0.0
+        self._last_shot_vz: float = 0.0
+        # ──────────────────────────────────────────────────
         session_dir = config.get("session", {}).get("session_dir", "data/sessions")
         self._session_manager = SessionManager(session_dir=session_dir)
 
@@ -2434,7 +2452,7 @@ class MainWindow(QMainWindow):
 
         details = QLabel(
             "• <b>Projekt:</b> Valós idejű sztereó látórendszer és trajektória előrejelzés robot kapushoz.<br>"
-            "• <b>Szoftver stack:</b> Python 3.12, PyQt6, OpenCV, PyTorch, YOLOv10 (CUDA GPU Acceleration)"
+            "• <b>Szoftver stack:</b> Python 3.12, PyQt6, OpenCV, PyTorch, YOLOv8 (CUDA GPU Acceleration)"
         )
         details.setStyleSheet("color: #CBD5E1; font-size: 12px;" if dark else "color: #334155; font-size: 12px;")
         card_vbox.addWidget(details)
@@ -2617,7 +2635,13 @@ class MainWindow(QMainWindow):
 
         if stats["pos_valid"]:
             self._lbl_x.setText(f"{stats['x_3d']:+.1f}")
-            self._lbl_y.setText(f"{stats['y_3d']:+.1f}")
+            # Y tengely: ha érvényes ballisztikus impact.y_mm előrejelzés van,
+            # azt mutatjuk (pontosabb). Ha nincs, visszaesünk a mért pozícióra.
+            _impact_for_y: Optional[ImpactPrediction] = stats.get("impact")
+            if _impact_for_y and _impact_for_y.valid:
+                self._lbl_y.setText(f"{_impact_for_y.y_mm:+.1f} ⬡")
+            else:
+                self._lbl_y.setText(f"{stats['y_3d']:+.1f}")
             self._lbl_z.setText(f"{stats['z_3d']:.1f}")
             speed_kmh = stats["speed_ms"] * 3.6
             self._lbl_speed.setText(f"{stats['speed_ms']:.1f} m/s ({speed_kmh:.1f} km/h)")
@@ -2676,22 +2700,124 @@ class MainWindow(QMainWindow):
                     gv.begin_shot(px_mm, py_mm, pconf, pt_s, p_in_goal)
                 elif shot_active:
                     gv.update_shot(px_mm, py_mm, pconf, pt_s, p_in_goal)
-            if shot_confirmed_event and hasattr(self, "_analytics_view") and self._analytics_view:
-                # Csak valódi lövésnél (ShotDetector által megerősített) rögzítünk eseményt!
-                speed_kmh = (stats.get("speed_ms", 12.5) or 12.5) * 3.6
-                sector = self._determine_defense_zone(px_mm, py_mm)
-                record = self._analytics_view.add_shot_event(
-                    x_mm=px_mm,
-                    y_mm=py_mm,
-                    conf=pconf,
-                    in_goal=p_in_goal,
-                    speed_kmh=speed_kmh,
-                    time_to_impact_s=pt_s,
-                    sector=sector,
-                )
-                # Munkamenet perzisztencia: automatikus mentés
-                if record and hasattr(self, '_session_manager'):
-                    self._session_manager.save_shot(record)
+
+            if shot_confirmed_event:
+                # ── Lövés megerősítés: telemetria gyűjtés és időzítés ──
+                self._shot_confirm_time = time.perf_counter()
+                # Pipeline és detektálási késleltetés tárolása későbbi használatra
+                self._last_shot_detection_latency_ms = stats.get("detection_inference_ms", 0.0)
+                self._last_shot_pipeline_ms = stats.get("detection_age_ms", 0.0)
+                self._last_shot_vx = stats.get("vx_mms", 0.0)
+                self._last_shot_vy = stats.get("vy_mms", 0.0)
+                self._last_shot_vz = stats.get("vz_mms", 0.0)
+
+                # ── Automatikus kapus mozgatás: ha van érvényes impact előrejelzés ──
+                auto_gk_sent = False
+                if impact and impact.valid and hasattr(self, "_actuator_view"):
+                    # A kapusnak pontosan oda mozogjon, ahova a labda jön
+                    gk_x = float(np.clip(impact.x_mm,
+                        -float(self._config.get("geometry", {}).get("goal_width_mm", 4000)) / 2.0,
+                         float(self._config.get("geometry", {}).get("goal_width_mm", 4000)) / 2.0))
+                    gk_y = float(np.clip(impact.y_mm, 0.0,
+                        float(self._config.get("geometry", {}).get("goal_height_mm", 2000))))
+                    self._last_goalkeeper_x_mm = gk_x
+                    self._last_goalkeeper_y_mm = gk_y
+                    self._last_goalkeeper_speed_m_s = getattr(
+                        self._actuator_view, "_speed_m_s", 2.5
+                    )
+                    self._last_goalkeeper_cmd_time = time.perf_counter()
+                    auto_gk_sent = True
+                    # Vizualizació frissítése
+                    if hasattr(self, "_goal_view") and self._goal_view:
+                        self._goal_view.set_goalkeeper_target(gk_x, gk_y)
+                    if hasattr(self, "_goal_view_full") and self._goal_view_full:
+                        self._goal_view_full.set_goalkeeper_target(gk_x, gk_y)
+                    logger.info(
+                        "Kapus automatikus küldés: X=%.0f mm, Y=%.0f mm (impact pred)",
+                        gk_x, gk_y
+                    )
+
+                # ── Rekord mentés az analytics-be és session manager-be ──
+                if hasattr(self, "_analytics_view") and self._analytics_view:
+                    speed_kmh = (stats.get("speed_ms", 12.5) or 12.5) * 3.6
+                    sector = self._determine_defense_zone(px_mm, py_mm)
+
+                    # Y érték forrása
+                    _imp = stats.get("impact")
+                    y_source = "pred" if (_imp and _imp.valid) else "mért"
+
+                    # Kapus reakcióidő: lövés megerősítés → parancs küldés
+                    goalkeeper_reaction_ms = 0.0
+                    if auto_gk_sent and self._shot_confirm_time > 0:
+                        goalkeeper_reaction_ms = (
+                            self._last_goalkeeper_cmd_time - self._shot_confirm_time
+                        ) * 1000.0
+                    elif self._last_goalkeeper_cmd_time > self._shot_confirm_time:
+                        # Kézi küldés esetén
+                        goalkeeper_reaction_ms = (
+                            self._last_goalkeeper_cmd_time - self._shot_confirm_time
+                        ) * 1000.0
+
+                    # Kapus becsült mozgási ideje (távolság / sebesség)
+                    goalkeeper_travel_ms = 0.0
+                    if auto_gk_sent and self._last_goalkeeper_speed_m_s > 0:
+                        # Jelenlegi kapus pozícióját olvassuk a goal_view-ból
+                        gv = getattr(self, "_goal_view", None)
+                        cur_gx, cur_gy = 0.0, 1000.0
+                        if gv and hasattr(gv, "_goalkeeper_x") and hasattr(gv, "_goalkeeper_y"):
+                            cur_gx = float(gv._goalkeeper_x)
+                            cur_gy = float(gv._goalkeeper_y)
+                        dist_mm = float(np.hypot(
+                            self._last_goalkeeper_x_mm - cur_gx,
+                            self._last_goalkeeper_y_mm - cur_gy
+                        ))
+                        goalkeeper_travel_ms = (dist_mm / 1000.0) / self._last_goalkeeper_speed_m_s * 1000.0
+
+                    # Detektálási módszer meghatározása
+                    det_method = "YOLO"
+                    if hasattr(stats.get("impact"), "valid"):
+                        pass  # később bővíthető
+
+                    # Z pozíció rögzítés
+                    z_now = stats.get("z_3d", 0.0)
+
+                    record = self._analytics_view.add_shot_event(
+                        x_mm=px_mm,
+                        y_mm=py_mm,
+                        conf=pconf,
+                        in_goal=p_in_goal,
+                        speed_kmh=speed_kmh,
+                        time_to_impact_s=pt_s,
+                        sector=sector,
+                        # ── Bővített telemetria ──────────────────────────────
+                        y_source=y_source,
+                        detection_latency_ms=self._last_shot_detection_latency_ms,
+                        total_pipeline_ms=self._last_shot_pipeline_ms,
+                        goalkeeper_reaction_ms=goalkeeper_reaction_ms,
+                        goalkeeper_x_cmd_mm=self._last_goalkeeper_x_mm if auto_gk_sent else 0.0,
+                        goalkeeper_y_cmd_mm=self._last_goalkeeper_y_mm if auto_gk_sent else 0.0,
+                        goalkeeper_travel_ms=goalkeeper_travel_ms,
+                        vx_mm_s=self._last_shot_vx,
+                        vy_mm_s=self._last_shot_vy,
+                        vz_mm_s=self._last_shot_vz,
+                        z_start_mm=0.0,   # TODO: ShotDetector-ből
+                        z_end_mm=z_now,
+                        det_method=det_method,
+                        conf_left=stats.get("conf_left", 0.0),
+                        conf_right=stats.get("conf_right", 0.0),
+                    )
+                    # Munkamenet perzisztencia: automatikus mentés
+                    if record and hasattr(self, '_session_manager'):
+                        self._session_manager.save_shot(record)
+                        logger.info(
+                            "TELEMETRIA MENTS: X=%.0f Y=%.0f (fRRás: %s) "
+                            "v=(%.0f, %.0f, %.0f) mm/s | det_lat=%.1f ms | pipeline=%.1f ms | "
+                            "kapus_reakció=%.1f ms | kapus_utazás=%.1f ms",
+                            px_mm, py_mm, y_source,
+                            self._last_shot_vx, self._last_shot_vy, self._last_shot_vz,
+                            self._last_shot_detection_latency_ms, self._last_shot_pipeline_ms,
+                            goalkeeper_reaction_ms, goalkeeper_travel_ms,
+                        )
 
         if shot_finished:
             if hasattr(self, "_goal_view") and self._goal_view:
@@ -2976,6 +3102,22 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(float, float, float)
     def _on_actuator_manual_pos(self, x_mm: float, y_mm: float, speed_m_s: float) -> None:
+        # Időbélyeg és célpozíció tárolása a reakcióidő számításához
+        self._last_goalkeeper_cmd_time = time.perf_counter()
+        self._last_goalkeeper_x_mm = x_mm
+        self._last_goalkeeper_y_mm = y_mm
+        self._last_goalkeeper_speed_m_s = speed_m_s
+
+        # Kézi küldés esetén is loggoljuk
+        if self._shot_confirm_time > 0:
+            reaction_ms = (self._last_goalkeeper_cmd_time - self._shot_confirm_time) * 1000.0
+            logger.info(
+                "Kapus kézi parancs: X=%.0f mm, Y=%.0f mm | Reakcióidő: %.1f ms",
+                x_mm, y_mm, reaction_ms
+            )
+        else:
+            logger.info("Kapus kézi parancs: X=%.0f mm, Y=%.0f mm (lövés nélkül)", x_mm, y_mm)
+
         if hasattr(self, "_goal_view") and self._goal_view:
             self._goal_view.set_goalkeeper_target(x_mm, y_mm)
         if hasattr(self, "_goal_view_full") and self._goal_view_full:

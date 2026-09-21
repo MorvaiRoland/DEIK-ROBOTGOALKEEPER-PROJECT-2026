@@ -469,7 +469,7 @@ gui:
 # =============================================================================
 logging:
   # Napló szintje: "DEBUG" | "INFO" | "WARNING" | "ERROR"
-  level: "DEBUG"
+  level: "INFO"
 
   # Napló fájl elérési útja (null = csak konzol)
   log_file: "data/goalkeeper.log"

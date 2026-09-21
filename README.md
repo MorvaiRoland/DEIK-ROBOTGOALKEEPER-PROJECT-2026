@@ -1,244 +1,327 @@
 # DEIK Robot Foci Kapus / DEIK Robot Goalkeeper
 
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![PyQt6](https://img.shields.io/badge/GUI-PyQt6-41CD52?style=flat-square&logo=qt&logoColor=white)](https://www.riverbankcomputing.com/software/pyqt/)
-[![PyTorch CUDA](https://img.shields.io/badge/GPU-PyTorch%20CUDA-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)](https://pytorch.org/)
-[![TensorRT](https://img.shields.io/badge/Inference-TensorRT-76B900?style=flat-square&logo=nvidia&logoColor=white)](https://developer.nvidia.com/tensorrt)
-[![OpenCV](https://img.shields.io/badge/Vision-OpenCV-5C3EE8?style=flat-square&logo=opencv&logoColor=white)](https://opencv.org/)
+<div align="center">
+
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![PyQt6](https://img.shields.io/badge/GUI-PyQt6-41CD52?style=for-the-badge&logo=qt&logoColor=white)](https://www.riverbankcomputing.com/software/pyqt/)
+[![PyTorch CUDA](https://img.shields.io/badge/GPU-PyTorch%20CUDA-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![TensorRT](https://img.shields.io/badge/Inference-TensorRT-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://developer.nvidia.com/tensorrt)
+[![OpenCV](https://img.shields.io/badge/Vision-OpenCV-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white)](https://opencv.org/)
+[![Status](https://img.shields.io/badge/Status-Actuator%20Wiring%20Phase-orange?style=for-the-badge&logo=target)](https://github.com/)
+[![Tests](https://img.shields.io/badge/Tests-41%2F41%20Passed-brightgreen?style=for-the-badge&logo=pytest&logoColor=white)](https://pytest.org/)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg?style=for-the-badge)](https://www.gnu.org/licenses/gpl-3.0)
+
+**Debreceni Egyetem – Informatikai Kar (DEIK)**  
+*Ipari sztereó gépi látásra és fizikai trajektória-előrejelzésre épülő valós idejű autonóm robotkapus rendszer*
 
 ---
 
-### Nyelvválasztás / Language Selection
-* [🇭🇺 Magyar nyelvű leírás](#-magyar-dokumentáció)
-* [🇬🇧 English Documentation](#-english-documentation)
-* [👥 Szerzők & Készítők / Authors](#-szerzők--authors)
+### 🌐 Gyors Navigáció / Language Navigation
+[🇭🇺 Magyar Dokumentáció](#-magyar-dokumentáció) • [🇬🇧 English Documentation](#-english-documentation) • [👥 Szerzők / Authors](#-szerzők--authors)
 
 ---
 
-## 🇭🇺 Magyar Dokumentáció
+</div>
 
-### 📌 Projektáttekintés
+<br/>
 
-A **DEIK Robot Foci Kapus** egy valós idejű, nagy sebességű optikai labdakövető és trajektória-előrejelző rendszer robot foci kapus mechanikák vezérléséhez. A rendszer két darab ipari **Ximea MC023CG-SY-UB** sztereó kamerával figyeli a pályát, és valós időben (100+ FPS) számítja ki a kapu síkjában ($Z=0$) a labda várható becsapódási pontját, idejét és a kapu eltalálásának valószínűségét.
+# 🇭🇺 Magyar Dokumentáció
 
-#### Főbb jellemzők és képességek:
-* **Kétkamerás Ximea illesztés**: Ipari Global Shutter érzékelők (Sony IMX174, 2.3 MP, max. 165 FPS), dedikált USB3 sávszélesség-kezelés és szinkronizált képgyűjtés.
-* **GPU-gyorsított AI detektálás**: TensorRT `.engine` (YOLOv8n / YOLOv10n / RT-DETR) modellek batch=2 GPU inferenciával NVIDIA CUDA architektúrán (>100 FPS).
-* **Szín- és mozgásszűrés**: HSV narancssárga színvalidáció (`OrangeBallFilter`) kifejezetten a mintás (pl. Kipsta 4/5) focilabdaspecifikus detektáláshoz, valamint Lucas-Kanade optikai folyam (`OpticalFlowTracker`) követés.
-* **Többszintű Kalman-szűrés**: Kameránkénti 2D Kalman-szűrő (`KalmanTracker`) a mérési zaj elnyomására, valamint 3D térbeli Kalman-szűrő a trajektória simítására.
-* **3D Sztereó Háromszögelés & Mono Depth Fallback**: Milliméter pontos 3D térbeli koordináta-meghatározás kalibrációs mátrixok alapján, illetve egykamerás mélységbecslés (`MonoDepthEstimator`) arra az esetre, ha a labda csak az egyik kamerában látható.
-* **Fizika-alapú pálya-előrejelzés**: Parabolikus mozgásmodell gravitációval ($g=9.81 \text{ m/s}^2$) és aerodinamikai légellenállási tényezővel ($C_d = 0.47$).
-* **PyQt6 Grafikus Felület**:
-  * Élő dual kamera feed SVG overlay elemekkel (detektálási dobozok, középpontok, 2D/3D vektorok, FPS számlálók).
-  * **GoalView Widget**: A kapu 2D síkú valós idejű grid vizualizációja becsapódási pontokkal, konfidencia-zónákkal és lövési előzményekkel.
-  * **ActuatorControlWidget**: Aktuátor/szervo tesztelő és vezérlő panel manuális felülbírálással, preset pozíciókkal és E-STOP (vészleállító) funkcióval.
-  * **AnalyticsView Dashboard**: Valós idejű grafikonok (sebesség, magasság, Z-mélység), 2D lövési hőtérkép (Heatmap), szektoros eloszlási mutatók és CSV/HTML riport exportálás.
-  * **CalibrationDialog**: Interaktív, többlépcsős sztereó kalibrációs varázsló élő sakktábla sarokdetektálási visszajelzéssel.
-  * **SplashScreen**: Indítási hardver- és környezeti diagnosztikai ellenőrzés (Health Check).
-* **Rugalmas futtatási módok**: GUI mód, Mock/Webcam fejlesztési mód (`--mock`), és korlátozott erőforrású vagy szerver környezetekhez tervezett Headless mód (`--no-gui`).
+## 📌 1. Projektáttekintés
 
----
+A **DEIK Robot Foci Kapus** egy valós idejű, nagy sebességű optikai labdakövető, 3D trajektória-előrejelző és robotkapus vezérlő rendszer. A berendezés két darab ipari **Ximea MC023CG-SY-UB** sztereó kamerával figyeli a kapu előtti játékteret, és valós időben (aktív konfigurációban **60 FPS**, hardveresen akár 165 FPS képfrissítéssel) számítja ki a kapu síkjában ($Z=0$) a labda várható becsapódási koordinátáit ($X, Y$), a becsapódásig hátralévő időt ($t_{\text{impact}}$) és a lövés kapuba tartásának valószínűségét.
 
-### 🛠 Hardver és Geometriai Specifikációk
-
-A rendszer a `config/config.yaml` fájlban finomhangolt aktív beállításokkal működik:
-
-| Komponens / Paraméter | Aktuális Specifikáció & Beállítás |
-|---|---|
-| **Kamera** | **Ximea MC023CG-SY-UB × 2** (USB 3.0) |
-| **Szenzor** | **Sony IMX174**, Global Shutter, 2.3 MP |
-| **Felbontás & FPS** | Natív: 1936 × 1216 (Max: **165 FPS**, Cél / Target: **100 FPS**) |
-| **Lencse** | **Fujifilm CF8ZA-1S**, 8mm, f/1.8 – f/4.0, C-Mount |
-| **Fókusztávolság (px)** | **~1365.2 px** (5.86 µm pixelmérettel) |
-| **Csatlakozás** | **EP-USB3HybridcableU-20** (20m hibrid kábel, USB 3.0) |
-| **GPU** | **NVIDIA RTX 3050 6GB** (TensorRT CUDA inferencia) |
-| **Kamera Elrendezés** | Bal: $X = -1070\text{ mm}$, Jobb: $X = +1070\text{ mm}$, Magasság: $Y = 2900\text{ mm}$, Z-offset: $-900\text{ mm}$ (Pitch: 40°) |
-| **Baseline (Kameratáv)** | **2369.4 mm** *(a `stereo_calibration.npz` kalibráció alapján)* |
-| **Kapu Mérete** | **4000 mm × 2000 mm** ($X \in [-2000, +2000]\text{ mm}$, $Y \in [0, 2000]\text{ mm}$) |
-| **Lövőtávolság** | **10000 mm** (10 méter a kapu síkjától) |
-| **Labda** | **Kipsta 4-es / 5-ös méret** (4-es: 210 mm átmérő, 340 g / 5-ös: 220 mm átmérő, 430 g) |
+### 🌟 Főbb Rendszerjellemzők:
+* **Ipari Kétkamerás Képgyűjtés**: Sony IMX174 Global Shutter szenzorok (2.3 MP, natív 1936 × 1216, aktív vágás: 1816 × 1216, 60 FPS, max. 165 FPS), 20 méteres optikai hibrid USB 3.0 adatátvitel, dedikált Linux kernel `usbfs_memory_mb` pufferkezelés (2048 MB).
+* **NVIDIA TensorRT GPU Gyorsítás**: Optimalizált `.engine` modellek (aktív: `models/yolov8n.engine`, támogatott: YOLOv10n, RT-DETR) batch=2 sztereó GPU inferenciával NVIDIA RTX 3050 GPU-n.
+* **Robusztus Hibrid Követési Pipeline**:
+  * `OrangeBallFilter`: HSV narancssárga szín- és morfológiai szűrő ($H \in [5, 25]$, $S \in [75, 255]$, $V \in [60, 255]$, $\text{min\_orange\_ratio} = 8\%$) dinamikus ROI ablakkal (300×300 px), amely a mintás és feliratos Kipsta 4/5 labdákat is üzembiztosan átengedi.
+  * `OpticalFlowTracker`: Lucas-Kanade optikai folyam követés a detektálások közötti mozgásvektorok azonnali frissítésére.
+  * `KalmanTracker`: Kameránkénti 2D Kalman-szűrő ($Q=0.05, R=0.05$) a mérési zaj elnyomására.
+* **3D Sztereó Háromszögelés & Monokuláris Fallback**: Milliméter pontos 3D térbeli pozíció-meghatározás kalibrációs mátrixokkal (`stereo_calibration.npz`), valamint egykamerás mélységbecslés (`MonoDepthEstimator`), ha a labda az egyik kamerában kitakarásba kerül.
+* **Fizika-Alapú Aerodinamikai Pályaszámítás**: 3D spatial Kalman-szűrővel kombinált parabolikus mozgásmodell gravitációval ($g=9810 \text{ mm/s}^2$) és aerodinamikai légellenállással ($C_d = 0.0005$, gömb forma $C_d=0.47$).
+* **Lövésdetektáló Logika (`shot_detection`)**: Kinematikai kapu felé tartó mozgásfigyelés ($Z \in [5000, 12000]\text{ mm}$ indítási zóna, $\min 1000\text{ mm}$ elmozdulás, $\min 4\text{ m/s}$ sebesség).
+* **PyQt6 Teljes Grafikus Vezérlőpult**:
+  * Élő dual kamera feed valós idejű SVG HUD réteggel (detektálási dobozok, középpontok, 3D koordináták, FPS számlálók).
+  * **GoalView Widget**: Kapu 2D vetület valós idejű becsapódási pontokkal, konfidencia-zónákkal és lövési előzményekkel.
+  * **ActuatorControlWidget**: Hardveres szervo/motor tesztelő és vezérlő panel manuális felülbírálással, preset pozíciókkal és azonnali **E-STOP (vészleállító)** funkcióval.
+  * **AnalyticsView Dashboard**: Valós idejű grafikonok (sebesség, magasság, Z-mélység), 2D lövési hőtérkép (Heatmap), szektoros statisztika és CSV/HTML jelentés exportálás.
+  * **CalibrationDialog**: Interaktív ChArUco táblás sztereó kalibrációs varázsló élő sarokdetektálással.
 
 ---
 
-### 📂 Projekt Struktúra
+## 🎯 2. Jelenlegi Státusz & Következő Mérföldkő: Fizikai Aktuátor Bekötése
+
+> [!IMPORTANT]
+> ### ⚡ AKTUÁLIS FEJLESZTÉSI FÁZIS: A FIZIKAI AKTUÁTOR BEKÖTÉSE
+> **A rendszer teljes szoftveres, gépi látási és irányítási pipeline-ja maradéktalanul elkészült és tesztelt.**
+> 
+> A kamerakezelés (stabil 60 FPS), a TensorRT AI inferencia, a 3D sztereó háromszögelés, az aerodinamikai trajektória-előrejelzés és a komplett PyQt6 operátori felület (az `ActuatorControlWidget` manuális tesztelővel és az E-STOP vészleállító logikával) **100%-osan üzemkész**.
+> 
+> A fejlesztés közvetlen, soron következő mérföldköve:
+> 1. **A fizikai kapusmechanizmus és aktuátorok (szervomotorok / lineáris és függőleges hajtások) mechanikai és villamos bekötése.**
+> 2. **A motorvezérlő elektronika (PLC / mikrokontroller / hajtásszabályozó) hardveres illesztése** a számítógéphez (CAN busz, Modbus, RS-485 vagy USB/Soros kapcsolaton keresztül).
+> 3. **A szoftveres vezérlőjelek összekapcsolása a fizikai hajtással**: a kapu síkjában kiszámított ($X, Y$) célpozíciók valós idejű mozgásparancsokká alakítása és a fizikai reakcióidő finomhangolása.
+> 4. **A hardveres E-STOP (vészleállító) áramkör éles biztonsági tesztelése** a mozgó mechanikán.
+
+---
+
+## 📐 3. Rendszerarchitektúra & Folyamatábra
+
+```mermaid
+flowchart TD
+    subgraph SENSORS["📷 Ipari Képalkotás (60 FPS, Sony IMX174)"]
+        CAM_L["Bal Kamera (SLAVE: CACAU2546000)\nPin 5 (Szürke / IN1)"]
+        CAM_R["Jobb Kamera (MASTER: CACAU2517001)\nPin 3 (Zöld / OUT1)"]
+        GPIO_SYNC["Hardveres GPIO Kábel (CBL-702)\nOpto-izolált EXPOSURE_ACTIVE -> TRIGGER"]
+        CAM_R -->|Trigger Jel| GPIO_SYNC -->|Trigger Bemenet| CAM_L
+    end
+
+    subgraph PIPELINE["🧠 Gépi Látás & 3D Trajektória Pipeline"]
+        BUF["Linux USBFS Kernel Buffer (2048 MB)"]
+        CAM_L & CAM_R --> BUF
+        BUF --> INFER["TensorRT GPU Inferencia (Batch=2)\nmodels/yolov8n.engine (Input: 640x640)"]
+        INFER --> FILTER["Szín- és Mozgásszűrés\n(OrangeBallFilter HSV + LK Optical Flow)"]
+        FILTER --> KALMAN2D["2D Kalman-szűrők (per-kamera, Q=0.05, R=0.05)"]
+        KALMAN2D --> STEREO["3D Sztereó Háromszögelés\n(Fallback: MonoDepthEstimator)"]
+        STEREO --> PRED["3D Kalman + Aerodinamikai Pályaszámítás\n(g=9810 mm/s², Cd=0.0005, Z=0 sík)"]
+        PRED --> IMPACT["Kapu Sík Becsapódási Pont\nZ=0 -> (X, Y, t_impact, P_goal)"]
+    end
+
+    subgraph ACTUATION["🤖 Aktuátor & Vezérlés (KÖVETKEZŐ LÉPÉS)"]
+        IMPACT --> CTRL["ActuatorControl Interfész"]
+        ESTOP["🚨 E-STOP Vészleállító"] --> CTRL
+        CTRL --> DRIVER["Motorvezérlő / PLC / Szabályozó"]
+        DRIVER ==> MOTOR_X["Vízszintes Lineáris Hajtás (X)"]
+        DRIVER ==> MOTOR_Y["Függőleges Hajtás (Y)"]
+        MOTOR_X & MOTOR_Y ==> GOALIE["🧤 Fizikai Robotkapus"]
+    end
+
+    subgraph UI["🖥️ PyQt6 Felhasználói Felület"]
+        IMPACT --> GOALVIEW["GoalView 2D Grid"]
+        IMPACT --> ANALYTICS["Analytics Dashboard"]
+        CTRL <--> UI_CTRL["ActuatorControlWidget"]
+    end
+```
+
+---
+
+## 🛠 4. Aktív Hardver és Geometriai Specifikációk
+
+Az alábbi paraméterek a [`config/config.yaml`](file:///home/student/Dokumentumok/DEIK-ROBOTGOALKEEPER-PROJECT-2026/config/config.yaml) fájlban aktívan konfigurált értékeket tükrözik:
+
+| Paraméter / Rendszerelem | Aktív Konfiguráció & Specifikáció | Rendszer Érték / Megjegyzés |
+|---|---|---|
+| **Kamerák** | **2× Ximea MC023CG-SY-UB** (USB 3.0) | Ipari Global Shutter gépilátás-kamera |
+| **Képérzékelő Szenzor** | **Sony IMX174**, 2.3 Megapixel | Pixelméret: **5.86 µm**, Szenzorméret: 11.345 × 7.127 mm |
+| **Képfelbontás** | **1816 × 1216 pixel** | Natív szenzor: 1936 × 1216 |
+| **Képkockaszám (FPS)** | **60 FPS** (cél / beállított érték) | Hardveres maximum: **165 FPS** |
+| **Expozíciós Idő** | **3000 µs (3.0 ms)** | Erősítés (Gain): **0.0 dB** |
+| **Optika / Lencse** | **2× Fujifilm CF8ZA-1S** | $f = 8.0\text{ mm}$, C-Mount, $f_{px} \approx 1365.2\text{ px}$ |
+| **Kamera Pozíciók (X)** | Bal: $X = -1050\text{ mm}$, Jobb: $X = +1050\text{ mm}$ | Kapu közepéhez képest szimmetrikusan |
+| **Kamerák Magassága (Y)** | **2700.0 mm** | Talajszint feletti magasság |
+| **Kamerák Z-Offsetje** | **-1200.0 mm** | A gólvonal ($Z=0$) mögött 1.2 méterrel |
+| **Kamera Dőlésszög (Pitch)**| **29° lefelé döntve** | Lefedi a gólvonal és a 10m-es lövőzóna közötti teret |
+| **Baseline (Kameratáv)** | **2200.0 mm** *(tartalék)* / **~2369.4 mm** *(kalibrált)* | `stereo_calibration.npz` alapján |
+| **Hardveres Szinkronizáció**| **Master-Slave GPIO (CBL-702 kábel)** | Jobb kamera MASTER (`CACAU2517001`), Bal SLAVE (`CACAU2546000`) |
+| **Szinkronizáció Módja** | **XI_GPO_EXPOSURE_ACTIVE $\rightarrow$ XI_GPI_TRIGGER** | Master Pin 3 (Zöld) $\rightarrow$ Slave Pin 5 (Szürke) |
+| **AI Detektor Modell** | **`models/yolov8n.engine`** (TensorRT FP16) | Bemeneti méret: 640×640, Osztály: 32 (*sports ball*) |
+| **Detektálási Küszöb** | Konfidencia: **0.15**, IoU: **0.45** | Érzékeny beállítás a repülő labda korai észlelésére |
+| **Labda Specifikáció** | **Kipsta 4-es narancssárga focilabda** | Átmérő: **210 mm**, Tömeg: **340 g**, $C_d = 0.47$ |
+| **Szín- és Alakszűrés** | HSV: $H \in [5, 25], S \in [75, 255], V \in [60, 255]$ | Min. narancs arány: **8%**, Dinamikus ROI: 300×300 px |
+| **Kapu Mérete** | **4000 mm × 2000 mm** (Szélesség × Magasság) | $X \in [-2000, +2000]\text{ mm}$, $Y \in [0, 2000]\text{ mm}$ |
+| **Kapu Tűrés (Margin)** | **150.0 mm** | Kereten kívülre eső labdaközéppontok toleranciája |
+| **Lövőtávolság** | **10000 mm (10 méter)** | Büntetőpont távolsága a kapu síkjától |
+| **ChArUco Kalibrációs Tábla**| **12×9 mezős ChArUco tábla (A1 méret)** | Négyzet: **65 mm**, ArUco marker: **50 mm**, `DICT_6X6_250` |
+
+---
+
+## 📂 5. Rendszerezett Projekt Struktúra
+
+A projekt a tiszta architektúra és a professzionális Python fejlesztési szabványok (PEP 517/518/621) szerint van felépítve:
 
 ```
 DEIK-ROBOTGOALKEEPER-PROJECT-2026/
-├── README.md                          ← Rendszer dokumentáció (Ez a fájl)
+├── pyproject.toml                     ← PEP 517/518/621 projekt konfiguráció és metaadatok
+├── pytest.ini                         ← Pytest futtató konfiguráció (pythonpath = src)
 ├── requirements.txt                   ← Python függőségek listája
 ├── setup.sh                           ← Automatikus környezeti telepítő szkript
-├── run.sh                             ← Rendszerindító szkript
+├── run.sh                             ← Fő rendszerindító szkript (USBFS ellenőrzéssel)
+├── launch_desktop.sh                  ← Asztali parancsikon indító szkript
+├── DEIK-Robot-Kapus.spec              ← PyInstaller építési specifikáció
+├── LICENSE                            ← GPLv3 licenc fájl
+├── README.md                          ← Rendszer dokumentáció (Ez a fájl)
 ├── config/
-│   └── config.yaml                    ← Fő konfigurációs fájl ⚙️
-├── src/
-│   ├── main.py                        ← Belépési pont (GUI & Headless) 🚀
-│   ├── camera/                        ← Kamera kezelő modulok
+│   ├── config.yaml                    ← Fő rendszerkonfiguráció ⚙️
+│   └── gui_settings.json              ← Helyi felületi állapotmentések
+├── src/                               ← Forráskód könyvtár (tiszta Python modulok)
+│   ├── main.py                        ← Fő belépési pont (GUI, Mock és Headless módok) 🚀
+│   ├── camera/                        ← Kamera alrendszer (Ximea xiAPI és Mock)
 │   │   ├── base_camera.py             ← Absztrakt kamera interfész
-│   │   ├── ximea_camera.py            ← Ximea xiAPI wrapper & sávszélesség kezelő
-│   │   ├── mock_camera.py             ← Webcam / videó / szintetikus teszt kamera
-│   │   ├── camera_manager.py          ← Dual kamera szinkronizáló és koordinátor
-│   │   └── camera_utils.py            ← Kamera segédfüggvények
-│   ├── detection/                     ← Detektálás és 2D követés
-│   │   ├── ball_detector.py           ← YOLO / RT-DETR TensorRT detektor
-│   │   ├── kalman_tracker.py          ← 2D Kalman-szűrő (per-kamera)
+│   │   ├── ximea_camera.py            ← Ximea xiAPI wrapper, sávszélesség & GPIO szinkron
+│   │   ├── mock_camera.py             ← Webcam / szintetikus videó teszt kamera
+│   │   ├── camera_manager.py          ← Kétkamerás koordinátor és frame szinkronizáció
+│   │   └── camera_utils.py            ← Linux USBFS memóriakezelő segédfüggvények
+│   ├── detection/                     ← Gépi látás és detektálás
+│   │   ├── ball_detector.py           ← TensorRT GPU detektor + OrangeBallFilter
+│   │   ├── kalman_tracker.py          ← 2D Kalman-szűrő (kameránkénti követés)
 │   │   └── optical_flow_tracker.py    ← Lucas-Kanade optikai folyam követő
 │   ├── stereo/                        ← 3D Sztereó látórendszer
-│   │   ├── triangulator.py            ← 3D sztereó háromszögelés
-│   │   └── mono_depth_estimator.py    ← Egykamerás mélységbecslő fallback
-│   ├── calibration/                   ← Kalibráció segédmodulok
-│   │   └── alignment_helper.py        ← Sakktábla pozíció és dőlésigazító
-│   ├── prediction/                    ← Fizikai pálya-előrejelzés
-│   │   └── trajectory_predictor.py    ← 3D Kalman + aerodinamikai fizikai modell
-│   └── gui/                           ← PyQt6 Grafikus Felület
-│       ├── main_window.py             ← Fő ablak és vezérlő logika
-│       ├── goal_view.py               ← Kapu 2D grid vizualizátor widget
+│   │   ├── triangulator.py            ← 3D sztereó háromszögelő modul
+│   │   └── mono_depth_estimator.py    ← Monokuláris mélységbecslő fallback modul
+│   ├── calibration/                   ← Kalibrációs segédeszközök
+│   │   └── alignment_helper.py        ← Sakktábla/ChArUco pozíció- és dőlésszög-igazító
+│   ├── prediction/                    ← Pályaszámítás és fizika
+│   │   └── trajectory_predictor.py    ← 3D Kalman + aerodinamikai fizikai mozgásmodell
+│   ├── session/                       ← Munkamenet és lövésnaplózás
+│   │   └── session_manager.py         ← Lövések és mérések JSONL mentése
+│   └── gui/                           ← PyQt6 Grafikus Felhasználói Felület
+│       ├── main_window.py             ← Főablak, vezérlési logika és élő HUD
+│       ├── goal_view.py               ← Kapu 2D sík vizualizáció és becsapódási pontok
 │       ├── actuator_widget.py         ← Aktuátor szervo tesztelő & E-STOP panel
-│       ├── analytics_view.py          ← Grafikonok, 2D hőtérkép és CSV/HTML riport
-│       ├── calibration_dialog.py      ← Sztereó kalibrációs varázsló ablak
-│       ├── splash_screen.py           ← Indító ablak Health Check diagnosztikával
+│       ├── analytics_view.py          ← Grafikonok, 2D hőtérkép és CSV/HTML export
+│       ├── calibration_dialog.py      ← Interaktív sztereó kalibrációs varázsló
+│       ├── splash_screen.py           ← Indítási hardver diagnosztikai ellenőrzés
 │       └── theme.py                   ← Sötét / Világos témakezelő
-├── scripts/                           ← Diagnosztikai és kalibrációs szkriptek
-│   ├── calibrate_stereo.py            ← Interaktív parancssori sztereó kalibráló
-│   ├── test_cameras.py                ← Kamera kapcsolat és FPS teszt
-│   ├── download_model.py              ← AI modell letöltő
-│   └── setup_usbfs_memory.sh          ← Linux USBFS memórialimit beállító (2048 MB)
-├── data/
-│   ├── calibration/                   ← Kalibrációs fájlok (stereo_calibration.npz)
-│   └── recordings/                    ← Mentett videók és felvételek
-└── tests/                             ← Pytest unit tesztek
-    ├── test_trajectory.py             ← Pálya-előrejelzés tesztek
-    ├── test_mono_depth.py             ← Monokuláris mélységtesztek
-    ├── test_kalman_tracker.py         ← 2D Kalman-szűrő tesztek
-    ├── test_optical_flow.py           ← Optikai folyam tesztek
-    ├── test_orange_ball_filter.py     ← Narancssárga szín szűrő tesztek
-    └── test_alignment_helper.py       ← Kalibrációs igazítási tesztek
+├── tools/                             ← Hardveres és GPIO diagnosztikai eszközök 🛠️
+│   ├── README.md                      ← Diagnosztikai eszközök és bekötési leírások
+│   ├── hw_sync_verify.py              ← Kamera timestamp és szinkron minőség mérő
+│   ├── gpio_read_level.py             ← Opto-izolált bemeneti szint monitorozó
+│   ├── gpio_test_master.py            ← Master expozíciós trigger generátor
+│   ├── gpio_test_slave.py             ← Slave trigger érzékelő tesztelő
+│   ├── multimeter_test.py             ← Kézi multiméteres feszültségmérő szkript (3.3V)
+│   └── test_bidir_ports.py            ← Kétirányú GPIO vonal tesztelő
+├── scripts/                           ← Operatív segédszkriptek és beállítók
+│   ├── calibrate_stereo.py            ← Parancssori sztereó sakktábla/ChArUco kalibráló
+│   ├── calibrate_world.py             ← Pálya világkoordináta-rendszer kalibráló
+│   ├── pick_world_points.py           ← Interaktív pontkijelölő a világkoordinátákhoz
+│   ├── test_cameras.py                ← Kamera kapcsolat és FPS diagnosztikai teszt
+│   ├── download_model.py              ← AI modell letöltő segédszkript
+│   └── setup_usbfs_memory.sh          ← Linux USBFS memóriabuffer növelő (2048 MB)
+├── data/                              ← Adattárolás (gitignored naplók és felvételek)
+│   ├── calibration/                   ← Sztereó kalibrációs mátrixok (`stereo_calibration.npz`)
+│   ├── recordings/                    ← Rögzített tesztvideók és képek
+│   └── sessions/                      ← Munkamenet lövési naplók (JSONL)
+├── models/                            ← AI modellek (`.engine`, `.onnx`, `.pt`)
+├── assets/                            ← Képi elemek és logók (`logo.png`, `deik_logo.png`)
+└── tests/                             ← Pytest automatizált tesztcsomag (41 teszteset)
 ```
 
 ---
 
-### 💻 Telepítés és Beállítás
+## 💻 6. Telepítés és Beállítás
 
-#### 1. Automatikus telepítés (Ajánlott)
+### 1. Automatikus telepítés (Ajánlott)
 ```bash
-git clone <repository_url>
+git clone https://github.com/MorvaiRoland/DEIK-ROBOTGOALKEEPER-PROJECT-2026.git
 cd DEIK-ROBOTGOALKEEPER-PROJECT-2026
-chmod +x setup.sh scripts/setup_usbfs_memory.sh
+chmod +x setup.sh run.sh scripts/setup_usbfs_memory.sh
 ./setup.sh
 ```
 
-#### 2. Linux USBFS memóriabuffer növelése (Ximea dual-camera használatához kötelező!)
-A két nagy sebességű Ximea kamera egyidejű működtetéséhez növelni kell az USB lefoglalt memóriát:
+### 2. Linux USBFS memóriabuffer növelése (Ximea dual-camera használatához kötelező!)
+A két nagy sebességű kamera stabil USB 3.0 adatátviteléhez növelni kell a kernel puffert:
 ```bash
 sudo ./scripts/setup_usbfs_memory.sh
 ```
 
-#### 3. Kézi telepítés
+### 3. Kézi környezetbeállítás
 ```bash
 # Virtuális környezet létrehozása
 python3 -m venv venv
 source venv/bin/activate
 
-# PyTorch telepítése CUDA támogatással (RTX GPU-hoz)
+# PyTorch telepítése CUDA támogatással (NVIDIA RTX GPU-hoz)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
-# Függőségek telepítése
+# Python csomagok telepítése
 pip install -r requirements.txt
 
 # YOLO / TensorRT modell letöltése
 python scripts/download_model.py
 ```
 
-#### 4. Ximea Linux SDK telepítése
-1. Töltsd le a [Ximea Linux Software Package](https://www.ximea.com/support/wiki/apis/XIMEA_Linux_Software_Package) csomagot.
-2. Telepítés:
+### 4. Ximea Linux SDK telepítése
+1. Töltsd le a hivatalos [Ximea Linux Software Package](https://www.ximea.com/support/wiki/apis/XIMEA_Linux_Software_Package) csomagot.
+2. Telepítsd a csomagot:
    ```bash
    tar -xzf ximea_linux_sp.tgz
-   cd package
-   sudo ./install
+   cd package && sudo ./install
    ```
-3. Python API telepítése a virtuális környezetbe:
+3. Fordítsd és telepítsd a `xiAPI` Python modult a virtuális környezetbe:
    ```bash
    cd /opt/XIMEA/api/Python/v3
-   python3 setup.py install
+   python setup.py install
    ```
 
 ---
 
-### 🚀 Indítás és Használat
+## 🚀 7. Indítás és Futtatási Módok
 
-#### Normál üzemmód (Valódi Ximea kamerákkal + Full GUI)
+### 1. Éles Üzemmód (Valós Ximea kamerákkal + PyQt6 GUI)
+```bash
+./run.sh
+```
+*vagy manuálisan:*
 ```bash
 source venv/bin/activate
 python src/main.py
 ```
-*vagy az indítószkripttel:*
-```bash
-./run.sh
-```
 
-#### Fejlesztői / Teszt üzemmód (Mock/Webcam kamera)
-Ha nincsenek csatlakoztatva a Ximea kamerák:
+### 2. Fejlesztői / Szimulációs Mód (Mock kamera / Webkamera)
+Használható Ximea hardver nélkül webkamerával vagy generált szimulációval:
 ```bash
 python src/main.py --mock
 ```
 
-#### Fejléc nélküli (Headless) üzemmód
-Szerveres futtatáshoz vagy GUI nélküli mérésekhez:
+### 3. Fejléc Nélküli (Headless) Mód
+Szerverkörnyezethez vagy háttérben futó mérésekhez (GUI ablak nélkül):
 ```bash
 python src/main.py --mock --no-gui
 ```
 
-#### Egyedi konfigurációs fájl és naplózási szint megadása
+### 4. Parancssori Opciók:
 ```bash
-python src/main.py --config config/custom_config.yaml --log-level DEBUG
+python src/main.py --help
+#   --mock              Szintetikus / webkamera teszt üzemmód
+#   --no-gui            Fejléc nélküli futtatás grafikus felület nélkül
+#   --config PATH       Egyedi konfigurációs fájl megadása (alap: config/config.yaml)
+#   --log-level LEVEL   Naplózási szint: DEBUG, INFO, WARNING, ERROR
 ```
 
 ---
 
-### 🎯 Sztereó Kalibrálás
+## 🎯 8. Sztereó Kalibráció (ChArUco)
 
-A 3D háromszögelés pontosságához a kamerákat első használat előtt kalibrálni kell.
+A milliméter pontos 3D háromszögeléshez a rendszert kalibrálni kell:
+1. Készíts elő egy **12×9 mezős**, **65 mm négyzetméretű**, **50 mm marker méretű** ChArUco táblát (`DICT_6X6_250` szótár).
+2. Indítsd el a rendszert (`./run.sh`), majd nyisd meg a **Sztereó Kalibráció** menüt.
+3. Gyűjts össze legalább 20–30 éles képpárt különböző távolságokból (0.5m – 4m).
+4. Futtasd a kalibrációt. Az eredmény automatikusan mentésre kerül a [`data/calibration/stereo_calibration.npz`](file:///home/student/Dokumentumok/DEIK-ROBOTGOALKEEPER-PROJECT-2026/data/calibration/stereo_calibration.npz) fájlba.
+*Parancssori alternatíva:* `python scripts/calibrate_stereo.py`
 
-#### Kalibráció menete a Grafikus Felületen (GUI):
-1. Indítsd el az alkalmazást: `python src/main.py`
-2. Készíts elő egy **70 mm-es négyzetméretű**, **12×9 mezős** (11×8 belső sarok) sakktáblát.
-3. Kattints a menüben a **Sztereó Kalibráció** gombra.
-4. Gyűjts össze legalább 20-30 éles képpárt különböző távolságokból (0.5m – 4m) és szögekből.
-5. Futtasd a kalibrációt a varázslóban. A rendszer automatikusan elmenti az eredményt a `data/calibration/stereo_calibration.npz` fájlba.
+---
 
-#### Kalibráció parancssorból:
+## 🛠️ 9. Hardveres Diagnosztika (`tools/`)
+
+A szinkronizáció és hardveres vonalak ellenőrzéséhez a [`tools/`](file:///home/student/Dokumentumok/DEIK-ROBOTGOALKEEPER-PROJECT-2026/tools/) mappa eszközei használhatók:
 ```bash
-python scripts/calibrate_stereo.py
+# Kamera szinkronizáció minőségének és időkülönbségének mérése
+python tools/hw_sync_verify.py
+
+# Kétoldali GPIO jelátviteli teszt
+python tools/test_bidir_ports.py
 ```
-* **Billentyűk**: `SPACE` = Képpár rögzítése, `c` = Kalibráció futtatása, `q` = Kilépés.
-* **Cél RMSE érték**: $< 1.0 \text{ px}$ (elfogadható), $< 0.5 \text{ px}$ (kiváló).
+*További részletekért lásd a [tools/README.md](file:///home/student/Dokumentumok/DEIK-ROBOTGOALKEEPER-PROJECT-2026/tools/README.md) dokumentációt.*
 
 ---
 
-### ⚙️ Konfiguráció (`config/config.yaml`)
+## 🧪 10. Automatizált Tesztelés (Pytest)
 
-A főbb paraméterek közvetlenül a `config/config.yaml` fájlban módosíthatók:
-* `camera.type`: `"ximea"` vagy `"mock"`
-* `camera.fps`: Célzott képfrissítés (pl. `100`)
-* `camera.exposure_time_us`: Zársebesség ($\mu s$, pl. `3000`)
-* `detection.model_path`: A TensorRT/YOLO modell fájl elérési útja (`models/yolov8n.engine`)
-* `detection.confidence_threshold`: Detektálási küszöb (alapértelmezett: `0.15`)
-* `prediction.drag_coefficient`: Légellenállási tényező (alapértelmezett: `0.0005`)
-* `geometry.baseline_mm`: Kamerák közötti fizikai távolság mm-ben (alapértelmezett: `2140.0`)
-
----
-
-### 🧪 Diagnosztika és Tesztelés
-
+A teljes rendszer átfogó automatizált egységtesztekkel van lefedve (detektorok, szűrők, háromszögelés, pálya-előrejelzés, UI widgetek):
 ```bash
-# Kamera kapcsolat, sorozatszámok és FPS tesztelése
-python scripts/test_cameras.py
-
-# Mock kamerateszt képablak megjelenítésével
-python scripts/test_cameras.py --mock --show-frames
-
-# Unit tesztek futtatása (pytest)
-pytest tests/ -v
+# Teljes tesztcsomag futtatása (41 teszt)
+pytest
 ```
 
 ---
@@ -247,100 +330,161 @@ pytest tests/ -v
 
 ---
 
-## 🇬🇧 English Documentation
+# 🇬🇧 English Documentation
 
-### 📌 Project Overview
+## 📌 1. Project Overview
 
-The **DEIK Robot Goalkeeper** project is a high-speed real-time optical ball detection, 3D tracking, and trajectory prediction system designed to control a robotic goalkeeper mechanism. Utilizing two industrial **Ximea MC023CG-SY-UB** stereo cameras, the system tracks a football in 3D space at 100+ FPS and predicts its precise impact coordinates, time-to-impact, and goal probability on the goal plane ($Z=0$).
+The **DEIK Robot Goalkeeper** project is a high-speed real-time optical ball tracking, 3D trajectory prediction, and robotic goalkeeper control system. Operating with two industrial **Ximea MC023CG-SY-UB** stereo cameras, the system observes the pitch at **60 FPS** (configurable, up to 165 FPS hardware maximum) and computes in real time the expected impact coordinates ($X, Y$), time-to-impact ($t_{\text{impact}}$), and goal probability on the goal plane ($Z=0$).
 
-#### Key Features & Capabilities:
-* **Dual Ximea Camera Acquisition**: Synchronized capture using industrial Sony IMX174 Global Shutter sensors (2.3 MP, up to 165 FPS), custom USB3 bandwidth limiters, and `usbfs_memory` allocation.
-* **TensorRT GPU Acceleration**: Optimized AI inference (`.engine` models for YOLOv8n / YOLOv10n / RT-DETR) running batch=2 processing on NVIDIA CUDA hardware at >100 FPS.
-* **Color & Motion Validation**: Integrated HSV orange color filter (`OrangeBallFilter`) tuned for patterned footballs (e.g. Kipsta size 4/5) and Lucas-Kanade Optical Flow tracker (`OpticalFlowTracker`).
-* **Multi-Stage Kalman Filtering**: Dual 2D Kalman filters (`KalmanTracker`) for per-camera noise reduction and a 3D spatial Kalman filter for smooth trajectory estimations.
-* **Stereo 3D Triangulation & Monocular Depth Fallback**: Millimeter-accurate 3D coordinate calculation via stereo calibration matrices, with single-camera depth estimation (`MonoDepthEstimator`) when object visibility is degraded.
-* **Physics-Based Trajectory Prediction**: Real-time parabolic motion solver including gravitational acceleration ($g=9.81 \text{ m/s}^2$) and quadratic aerodynamic drag ($C_d = 0.47$).
-* **PyQt6 Visualization Suite**:
-  * Dual live camera feeds with SVG HUD overlays (bounding boxes, centroids, 2D/3D vectors, real-time FPS).
-  * **GoalView Widget**: Interactive 2D goal plane grid showing projected impact points, confidence rings, and shot history.
-  * **ActuatorControlWidget**: Hardware actuator/servo control and test panel featuring manual overrides, preset target positions, and emergency stop (E-STOP).
-  * **AnalyticsView Dashboard**: Real-time performance analytics (ball speed, altitude, depth profile), 2D shot heatmap, goal sector breakdown, and CSV/HTML report export.
-  * **CalibrationDialog**: Interactive step-by-step stereo calibration wizard with live chessboard feedback.
-  * **SplashScreen**: Automated startup hardware & system health diagnostic check.
-* **Versatile Execution Modes**: Full PyQt6 GUI mode, Mock/Webcam development mode (`--mock`), and headless server execution (`--no-gui`).
-
----
-
-### 🛠 Hardware & Geometry Specifications
-
-Active specifications based on `config/config.yaml`:
-
-| Component / Parameter | Active Specification & Setting |
-|---|---|
-| **Camera** | **Ximea MC023CG-SY-UB × 2** (USB 3.0) |
-| **Sensor** | **Sony IMX174**, Global Shutter, 2.3 MP |
-| **Max FPS** | Native: 1936 × 1216 (Max: **165 FPS**, Target: **100 FPS**) |
-| **Lens** | **Fujifilm CF8ZA-1S**, 8mm, f/1.8 – f/4.0, C-Mount |
-| **Focal Length (px)** | **~1365.2 px** (5.86 µm pixel size) |
-| **Connection** | **EP-USB3HybridcableU-20** (20m hybrid cable, USB 3.0) |
-| **GPU** | **NVIDIA RTX 3050 6GB** (TensorRT CUDA acceleration) |
-| **Camera Layout** | Left: $X = -1070\text{ mm}$, Right: $X = +1070\text{ mm}$, Height: $Y = 2900\text{ mm}$, Z-offset: $-900\text{ mm}$ (Pitch: 40°) |
-| **Baseline** | **2369.4 mm** *(calibrated value from `stereo_calibration.npz`)* |
-| **Goal Dimensions** | **4000 mm × 2000 mm** ($X \in [-2000, +2000]\text{ mm}$, $Y \in [0, 2000]\text{ mm}$) |
-| **Shooting Distance** | **10000 mm** (10 meters from goal plane) |
-| **Ball Target** | **Kipsta Size 4 / Size 5** (Size 4: 210 mm diameter, 340 g / Size 5: 220 mm diameter, 430 g) |
+### 🌟 Key Capabilities:
+* **Industrial Dual-Camera Capture**: Sony IMX174 Global Shutter sensors (2.3 MP, native 1936 × 1216, active ROI: 1816 × 1216, 60 FPS, max 165 FPS), 20-meter hybrid optical USB 3.0 transmission, and dedicated Linux kernel `usbfs_memory_mb` buffer management (2048 MB).
+* **NVIDIA TensorRT GPU Acceleration**: Optimized `.engine` models (active: `models/yolov8n.engine`, also supporting YOLOv10n, RT-DETR) running batch=2 stereo GPU inference on NVIDIA RTX 3050 GPU.
+* **Robust Multi-Stage Tracking**:
+  * `OrangeBallFilter`: Specialized HSV color & morphology filter ($H \in [5, 25], S \in [75, 255], V \in [60, 255]$, $\text{min\_orange\_ratio} = 8\%$) with dynamic ROI tracking (300×300 px) for patterned Kipsta size 4/5 footballs.
+  * `OpticalFlowTracker`: Lucas-Kanade optical flow tracking for zero-latency inter-frame motion estimation.
+  * `KalmanTracker`: Per-camera 2D Kalman filter ($Q=0.05, R=0.05$) for measurement noise suppression.
+* **3D Stereo Triangulation & Monocular Fallback**: Millimeter-accurate 3D coordinate reconstruction via stereo calibration matrices (`stereo_calibration.npz`), with single-camera depth estimation (`MonoDepthEstimator`) fallback when occlusion occurs.
+* **Physics-Based Aerodynamic Trajectory Solver**: 3D spatial Kalman filter combined with parabolic motion, gravity ($g=9810 \text{ mm/s}^2$), and aerodynamic drag ($C_d = 0.0005$, sphere drag $C_d=0.47$).
+* **Kinematic Shot Detection (`shot_detection`)**: Robust launch zone gating ($Z \in [5000, 12000]\text{ mm}$), minimum travel threshold ($\ge 1000\text{ mm}$), and minimum velocity threshold ($\ge 4\text{ m/s}$).
+* **Full-Featured PyQt6 Operator GUI**:
+  * Live dual camera feed with dynamic SVG HUD overlays (bounding boxes, vectors, 3D coordinates, FPS).
+  * **GoalView Widget**: 2D goal plane visualization with real-time impact points, confidence rings, and shot history.
+  * **ActuatorControlWidget**: Actuator/servo test and control panel with manual overrides, preset target positions, and instant **E-STOP (Emergency Stop)**.
+  * **AnalyticsView Dashboard**: Real-time performance metrics (speed, height, Z-depth profile), 2D shot heatmap, sector analysis, and CSV/HTML report export.
+  * **CalibrationDialog**: Step-by-step interactive ChArUco stereo calibration wizard.
 
 ---
 
-### 💻 Quick Start & Execution
+## 🎯 2. Current Status & Next Milestone: Physical Actuator Integration
+
+> [!IMPORTANT]
+> ### ⚡ CURRENT DEVELOPMENT PHASE: PHYSICAL ACTUATOR INTEGRATION
+> **The entire software, computer vision, and trajectory prediction pipeline is fully completed and verified.**
+> 
+> High-speed camera acquisition (60 FPS), TensorRT AI detection, 3D stereo triangulation, aerodynamic impact prediction, and the full PyQt6 GUI (including manual servo override and software E-STOP) **are 100% operational**.
+> 
+> The immediate next milestone of the project is:
+> 1. **Connecting the physical robotic goalkeeper mechanism and actuators (servomotors / linear drives).**
+> 2. **Interfacing the motor controller hardware (PLC / microcontroller / motor driver)** with the host PC via CAN, RS-485, USB/Serial, or Ethernet.
+> 3. **Linking the software trajectory output to physical motion**: dispatching projected ($X, Y$) impact coordinates to the drive controller and fine-tuning real-time response latency.
+> 4. **Conducting live hardware testing of the E-STOP safety circuit** on the physical rig.
+
+---
+
+## 📐 3. System Architecture
+
+```mermaid
+flowchart TD
+    subgraph SENSORS["📷 Industrial Vision (60 FPS, Sony IMX174)"]
+        CAM_L["Left Camera (SLAVE: CACAU2546000)\nPin 5 (Gray / IN1)"]
+        CAM_R["Right Camera (MASTER: CACAU2517001)\nPin 3 (Green / OUT1)"]
+        GPIO_SYNC["Hardware GPIO Cable (CBL-702)\nOpto-isolated EXPOSURE_ACTIVE -> TRIGGER"]
+        CAM_R -->|Trigger Pulse| GPIO_SYNC -->|Trigger Input| CAM_L
+    end
+
+    subgraph PIPELINE["🧠 Computer Vision & Trajectory Pipeline"]
+        BUF["Linux USBFS Kernel Buffer (2048 MB)"]
+        CAM_L & CAM_R --> BUF
+        BUF --> INFER["TensorRT GPU Inference (Batch=2)\nmodels/yolov8n.engine (Input: 640x640)"]
+        INFER --> FILTER["Color & Motion Validation\n(OrangeBallFilter HSV + LK Optical Flow)"]
+        FILTER --> KALMAN2D["2D Kalman Filters (Per-camera, Q=0.05, R=0.05)"]
+        KALMAN2D --> STEREO["3D Stereo Triangulation\n(Fallback: MonoDepthEstimator)"]
+        STEREO --> PRED["3D Kalman + Aerodynamic Solver\n(g=9810 mm/s², Cd=0.0005, Z=0 plane)"]
+        PRED --> IMPACT["Goal Plane Impact Point\nZ=0 -> (X, Y, t_impact, P_goal)"]
+    end
+
+    subgraph ACTUATION["🤖 Actuation & Control (NEXT MILESTONE)"]
+        IMPACT --> CTRL["ActuatorControl Interface"]
+        ESTOP["🚨 Hardware E-STOP"] --> CTRL
+        CTRL --> DRIVER["Motor Driver / PLC / Motion Controller"]
+        DRIVER ==> MOTOR_X["Horizontal Linear Drive (X)"]
+        DRIVER ==> MOTOR_Y["Vertical Drive (Y)"]
+        MOTOR_X & MOTOR_Y ==> GOALIE["🧤 Physical Robotic Goalkeeper"]
+    end
+
+    subgraph UI["🖥️ PyQt6 Graphical User Interface"]
+        IMPACT --> GOALVIEW["GoalView 2D Grid"]
+        IMPACT --> ANALYTICS["Analytics Dashboard"]
+        CTRL <--> UI_CTRL["ActuatorControlWidget"]
+    end
+```
+
+---
+
+## 🛠 4. Active Hardware & Geometry Specifications
+
+Synchronized with [`config/config.yaml`](file:///home/student/Dokumentumok/DEIK-ROBOTGOALKEEPER-PROJECT-2026/config/config.yaml):
+
+| Parameter / Component | Active Specification | System Value / Notes |
+|---|---|---|
+| **Cameras** | **2× Ximea MC023CG-SY-UB** (USB 3.0) | Industrial vision cameras, aluminum enclosure |
+| **Image Sensor** | **Sony IMX174**, Global Shutter, 2.3 MP | Pixel size: **5.86 µm**, Sensor size: 11.345 × 7.127 mm |
+| **Resolution** | **1816 × 1216 pixels** | Native sensor: 1936 × 1216 |
+| **Frame Rate** | **60 FPS** (configured target) | Hardware maximum: **165 FPS** |
+| **Exposure Time** | **3000 µs (3.0 ms)** | Analog Gain: **0.0 dB** |
+| **Lenses** | **2× Fujifilm CF8ZA-1S** | $f = 8.0\text{ mm}$, C-Mount, $f_{px} \approx 1365.2\text{ px}$ |
+| **Camera Positions (X)** | Left: $X = -1050\text{ mm}$, Right: $X = +1050\text{ mm}$ | Symmetrical relative to goal center |
+| **Camera Height (Y)** | **2700.0 mm** | Height above ground level |
+| **Camera Z-Offset** | **-1200.0 mm** | 1.2 meters behind the goal line ($Z=0$) |
+| **Camera Pitch Angle** | **29° downward pitch** | Covers goal plane to 10m shooting zone |
+| **Baseline Distance** | **2200.0 mm** *(fallback)* / **~2369.4 mm** *(calibrated)* | Measured via `stereo_calibration.npz` |
+| **Hardware Synchronization**| **Master-Slave GPIO (CBL-702 cable)** | Right: MASTER (`CACAU2517001`), Left: SLAVE (`CACAU2546000`) |
+| **Sync Signal Configuration**| **XI_GPO_EXPOSURE_ACTIVE $\rightarrow$ XI_GPI_TRIGGER** | Master Pin 3 (Green) $\rightarrow$ Slave Pin 5 (Gray) |
+| **AI Inference Model** | **`models/yolov8n.engine`** (TensorRT FP16) | Input: 640×640, Class: 32 (*sports ball*) |
+| **Detection Thresholds** | Confidence: **0.15**, IoU: **0.45** | Sensitive tuning for early ball detection |
+| **Ball Target** | **Kipsta Size 4 Orange Football** | Diameter: **210 mm**, Mass: **340 g**, $C_d = 0.47$ |
+| **Color & Morphology Filter**| HSV: $H \in [5, 25], S \in [75, 255], V \in [60, 255]$ | Min orange ratio: **8%**, Dynamic ROI: 300×300 px |
+| **Goal Dimensions** | **4000 mm × 2000 mm** (Width × Height) | $X \in [-2000, +2000]\text{ mm}$, $Y \in [0, 2000]\text{ mm}$ |
+| **Goal Margin** | **150.0 mm** | Ball center tolerance beyond goal frame |
+| **Shooting Distance** | **10000 mm (10 meters)** | From penalty mark to goal plane |
+| **ChArUco Calibration Board**| **12×9 ChArUco board (A1 size)** | Square: **65 mm**, ArUco marker: **50 mm**, `DICT_6X6_250` |
+
+---
+
+## 💻 5. Quick Start & Execution
 
 ```bash
-# Clone repository
-git clone <repository_url>
+# 1. Clone repository
+git clone https://github.com/MorvaiRoland/DEIK-ROBOTGOALKEEPER-PROJECT-2026.git
 cd DEIK-ROBOTGOALKEEPER-PROJECT-2026
 
-# Automatic setup
-chmod +x setup.sh scripts/setup_usbfs_memory.sh
+# 2. Automated environment setup
+chmod +x setup.sh run.sh scripts/setup_usbfs_memory.sh
 ./setup.sh
 
-# Increase USB memory buffer for Ximea dual cameras (Required)
+# 3. Increase USBFS kernel memory buffer (Required for Ximea dual cameras)
 sudo ./scripts/setup_usbfs_memory.sh
 
-# Run application with Ximea cameras
-python src/main.py
+# 4. Launch main application
+./run.sh
 
-# Run in Mock mode (webcam / test video)
+# Launch in mock / webcam mode (without Ximea cameras)
 python src/main.py --mock
 
-# Run in Headless mode (no GUI)
+# Launch in headless mode (no GUI)
 python src/main.py --mock --no-gui
 ```
 
 ---
 
-### 🧪 Testing & Diagnostics
+## 🧪 6. Testing & Quality Assurance
 
 ```bash
-# Diagnostic test for Ximea cameras and frame rate
-python scripts/test_cameras.py
-
-# Run automated test suite
-pytest tests/ -v
+# Run automated test suite (41/41 passing tests)
+pytest
 ```
 
 ---
 
 <br/>
 
----
-
-## 👥 Szerzők & Készítők / Authors
+## 👥 Szerzők & Authors
 
 ### **Debreceni Egyetem – Informatikai Kar (DEIK)**
 **DEIK Robot Foci Kapus Projekt 2026 / DEIK Robot Goalkeeper Project 2026**
 
-* 👨‍💻 **Morvai Roland** – *BSc Mérnökinformatikus* (DEIK)
+* 👨‍💻 **Morvai Roland** – *BSc Mérnökinformatikus* (DEIK) – [GitHub](https://github.com/MorvaiRoland)
 * 👨‍💻 **Rácz Donát** – *BSc Mérnökinformatikus* (DEIK)
 
 ---
-*Copyright © 2026 DEIK Robot Goalkeeper Team. All Rights Reserved.*
+*Copyright © 2026 DEIK Robot Goalkeeper Team. All Rights Reserved. Licensed under GNU General Public License v3.0.*

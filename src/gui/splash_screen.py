@@ -147,7 +147,7 @@ class SplashScreen(QWidget):
         steps = [
             (15, "Konfigurációs fájlok és architektúra betöltése..."),
             (35, "Kamera illesztőprogramok (Ximea CMOS) ellenőrzése..."),
-            (55, "YOLOv10 AI detektor inicializálása CUDA GPU-n..."),
+            (55, "YOLOv8 AI detektor inicializálása CUDA GPU-n..."),
             (75, "Sztereó optikai kalibráció és Kalman-szűrő beállítása..."),
             (95, "DEIK Grafikus felület felépítése..."),
             (100, "DEIK Robot Foci Kapus készen áll!"),

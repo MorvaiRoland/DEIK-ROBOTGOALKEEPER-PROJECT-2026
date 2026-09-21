@@ -12,6 +12,7 @@ Bővített statisztikai és elemző felület:
   - Téma-tudatos (Dark Mode & Light Mode)
 """
 
+import base64
 import csv
 import logging
 import math
@@ -252,21 +253,58 @@ class AnalyticsDashboardWidget(QWidget):
         speed_kmh: float = 0.0,
         time_to_impact_s: float = 0.0,
         sector: str = "",
-    ) -> None:
-        """Hozzáad egy új lövés eseményt a bővített analitikai gyűjteményhez."""
+        # ── Bővített telemetria mezők ────────────────────────────────────
+        y_source: str = "mért",            # "pred" = impact.y_mm, "mért" = pos_3d[1]
+        detection_latency_ms: float = 0.0, # kamera frame → YOLO inferencia befejezése
+        total_pipeline_ms: float = 0.0,    # frame → GUI megjelenítés (teljes pipeline)
+        goalkeeper_reaction_ms: float = 0.0,  # lövés megerősítés → kapus parancs küldés
+        goalkeeper_x_cmd_mm: float = 0.0,  # merre lett küldve a kapus (X)
+        goalkeeper_y_cmd_mm: float = 0.0,  # merre lett küldve a kapus (Y)
+        goalkeeper_travel_ms: float = 0.0, # becsült kapus mozgási idő (távolság/sebesség)
+        vx_mm_s: float = 0.0,             # sebességvektor X komponens
+        vy_mm_s: float = 0.0,             # sebességvektor Y komponens
+        vz_mm_s: float = 0.0,             # sebességvektor Z komponens (negatív = kapu felé)
+        z_start_mm: float = 0.0,          # Z pozíció lövés kezdetén
+        z_end_mm: float = 0.0,            # Z pozíció lövés végén (kapu közelében)
+        det_method: str = "YOLO",         # detektálási módszer: YOLO / HSV / OptFlow
+        conf_left: float = 0.0,           # bal kamera detektálási konfidencia
+        conf_right: float = 0.0,          # jobb kamera detektálási konfidencia
+    ) -> dict:
+        """Hozzáad egy új lövés eseményt a bővített telemetria gyűjteményhez."""
         if not sector:
             sector = self._determine_sector(x_mm, y_mm)
 
         record = {
+            # ── Alap azonosítók ─────────────────────────────────────────
             "timestamp": time.strftime("%H:%M:%S"),
             "timestamp_full": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "x_mm": x_mm,
-            "y_mm": y_mm,
-            "conf": conf,
+            # ── Becsapódási pozíció ──────────────────────────────────────
+            "x_mm": round(x_mm, 1),
+            "y_mm": round(y_mm, 1),
+            "y_source": y_source,          # honnan jön az Y érték
+            "conf": round(conf, 3),
             "in_goal": in_goal,
-            "speed_kmh": speed_kmh,
-            "time_to_impact_s": time_to_impact_s,
             "sector": sector,
+            # ── Labda fizika ─────────────────────────────────────────────
+            "speed_kmh": round(speed_kmh, 2),
+            "time_to_impact_s": round(time_to_impact_s, 4),
+            "vx_mm_s": round(vx_mm_s, 1),
+            "vy_mm_s": round(vy_mm_s, 1),
+            "vz_mm_s": round(vz_mm_s, 1),
+            "z_start_mm": round(z_start_mm, 1),
+            "z_end_mm": round(z_end_mm, 1),
+            # ── Pipeline időzítés ────────────────────────────────────────
+            "detection_latency_ms": round(detection_latency_ms, 2),
+            "total_pipeline_ms": round(total_pipeline_ms, 2),
+            # ── Kapus reakció ────────────────────────────────────────────
+            "goalkeeper_reaction_ms": round(goalkeeper_reaction_ms, 2),
+            "goalkeeper_x_cmd_mm": round(goalkeeper_x_cmd_mm, 1),
+            "goalkeeper_y_cmd_mm": round(goalkeeper_y_cmd_mm, 1),
+            "goalkeeper_travel_ms": round(goalkeeper_travel_ms, 2),
+            # ── Detektálás minősége ──────────────────────────────────────
+            "det_method": det_method,
+            "conf_left": round(conf_left, 3),
+            "conf_right": round(conf_right, 3),
         }
         self._shot_records.append(record)
         self._heatmap.set_shots(self._shot_records)
@@ -366,15 +404,20 @@ class AnalyticsDashboardWidget(QWidget):
         stats_form.addRow("Munkamenet:", self._lbl_stat_session)
 
         # Lövési Lista Táblázat
-        table_grp = QGroupBox("Legutóbbi Lövések Részletes Listája")
+        table_grp = QGroupBox("Legutóbbi Lövések Részletes Listája – Teljes Telemetria")
         table_box = QVBoxLayout(table_grp)
 
-        self._table = QTableWidget(0, 7)
+        self._table = QTableWidget(0, 12)
         self._table.setHorizontalHeaderLabels([
-            "Időpont", "X (mm)", "Y (mm)", "Sebesség", "Becsap. Idő", "Szektor", "Eredmény"
+            "Időpont", "X (mm)", "Y (mm)", "Sebesség",
+            "Becsap. Idő", "Det. Latencia", "Pipeline",
+            "Kapus Reakció", "Kapus Cél", "Det. Módszer",
+            "Szektor", "Eredmény"
         ])
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(True)
         table_box.addWidget(self._table)
 
         details_box.addWidget(stats_grp, stretch=1)
@@ -391,6 +434,8 @@ class AnalyticsDashboardWidget(QWidget):
         # Sebességek és becsapódási idők
         speeds = [r.get("speed_kmh", 0.0) for r in self._shot_records if r.get("speed_kmh", 0.0) > 0]
         times = [r.get("time_to_impact_s", 0.0) for r in self._shot_records if r.get("time_to_impact_s", 0.0) > 0]
+        reactions = [r.get("goalkeeper_reaction_ms", 0.0) for r in self._shot_records if r.get("goalkeeper_reaction_ms", 0.0) > 0]
+        pipelines = [r.get("total_pipeline_ms", 0.0) for r in self._shot_records if r.get("total_pipeline_ms", 0.0) > 0]
 
         # Szektor statisztika
         left = sum(1 for r in self._shot_records if "BAL" in r.get("sector", ""))
@@ -414,28 +459,83 @@ class AnalyticsDashboardWidget(QWidget):
 
         self._lbl_stat_sectors.setText(f"BAL: {left} | KÖZÉP: {center} | JOBB: {right}")
 
-        # Táblázat frissítés
+        # Munkamenet infó bővítése
+        extra_parts = []
+        if reactions:
+            extra_parts.append(f"Átl. reakció: {sum(reactions)/len(reactions):.0f} ms")
+        if pipelines:
+            extra_parts.append(f"Átl. pipeline: {sum(pipelines)/len(pipelines):.0f} ms")
+        if extra_parts and hasattr(self, "_lbl_stat_session"):
+            self._lbl_stat_session.setText("  |  ".join(extra_parts))
+
+        # Táblázat frissítés (12 oszlop)
         self._table.setRowCount(0)
         for i, rec in enumerate(reversed(self._shot_records)):
             self._table.insertRow(i)
             ig = rec.get("in_goal", False)
             res_str = "KAPUBAN ✓" if ig else "MELLÉ ✕"
 
+            # 0: Időpont
             self._table.setItem(i, 0, QTableWidgetItem(rec.get("timestamp", "—")))
-            self._table.setItem(i, 1, QTableWidgetItem(f"{rec.get('x_mm', 0):+.0f}"))
-            self._table.setItem(i, 2, QTableWidgetItem(f"{rec.get('y_mm', 0):.0f}"))
 
+            # 1: X (mm)
+            self._table.setItem(i, 1, QTableWidgetItem(f"{rec.get('x_mm', 0):+.0f}"))
+
+            # 2: Y (mm) – forrás jelzéssel
+            y_src = rec.get("y_source", "")
+            y_lbl = f"{rec.get('y_mm', 0):.0f}"
+            if y_src == "pred":
+                y_lbl += " ⬡"
+            item_y = QTableWidgetItem(y_lbl)
+            item_y.setToolTip("⬡ = ballisztikus előrejelzés (impact.y_mm)" if y_src == "pred"
+                              else "Mért sztereó Y pozíció")
+            self._table.setItem(i, 2, item_y)
+
+            # 3: Sebesség
             spd = rec.get("speed_kmh", 0.0)
             self._table.setItem(i, 3, QTableWidgetItem(f"{spd:.1f} km/h" if spd > 0 else "—"))
 
+            # 4: Becsapódási idő
             tti = rec.get("time_to_impact_s", 0.0)
-            self._table.setItem(i, 4, QTableWidgetItem(f"{tti:.3f} mp" if tti > 0 else "—"))
+            self._table.setItem(i, 4, QTableWidgetItem(f"{tti:.3f} s" if tti > 0 else "—"))
 
-            self._table.setItem(i, 5, QTableWidgetItem(rec.get("sector", "—")))
+            # 5: Detektálási latencia
+            det_lat = rec.get("detection_latency_ms", 0.0)
+            self._table.setItem(i, 5, QTableWidgetItem(f"{det_lat:.1f} ms" if det_lat > 0 else "—"))
 
+            # 6: Teljes pipeline
+            pipe = rec.get("total_pipeline_ms", 0.0)
+            self._table.setItem(i, 6, QTableWidgetItem(f"{pipe:.1f} ms" if pipe > 0 else "—"))
+
+            # 7: Kapus reakcióidő
+            react = rec.get("goalkeeper_reaction_ms", 0.0)
+            item_react = QTableWidgetItem(f"{react:.1f} ms" if react > 0 else "—")
+            if 0 < react <= 50:
+                item_react.setForeground(QColor("#4ADE80"))  # Zöld: kiváló
+            elif 0 < react <= 100:
+                item_react.setForeground(QColor("#FCD34D"))  # Sárga: jó
+            elif react > 100:
+                item_react.setForeground(QColor("#F87171"))  # Piros: lassú
+            self._table.setItem(i, 7, item_react)
+
+            # 8: Kapus célpozíció
+            gx = rec.get("goalkeeper_x_cmd_mm", 0.0)
+            gy = rec.get("goalkeeper_y_cmd_mm", 0.0)
+            if gx != 0.0 or gy != 0.0:
+                self._table.setItem(i, 8, QTableWidgetItem(f"X:{gx:+.0f} Y:{gy:.0f}"))
+            else:
+                self._table.setItem(i, 8, QTableWidgetItem("—"))
+
+            # 9: Detektálási módszer
+            self._table.setItem(i, 9, QTableWidgetItem(rec.get("det_method", "—")))
+
+            # 10: Szektor
+            self._table.setItem(i, 10, QTableWidgetItem(rec.get("sector", "—")))
+
+            # 11: Eredmény
             item_res = QTableWidgetItem(res_str)
             item_res.setForeground(QColor("#10B981") if ig else QColor("#EF4444"))
-            self._table.setItem(i, 6, item_res)
+            self._table.setItem(i, 11, item_res)
 
     @pyqtSlot()
     def _clear_analytics(self) -> None:
@@ -454,18 +554,39 @@ class AnalyticsDashboardWidget(QWidget):
                 with open(path, "w", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow([
-                        "Timestamp", "X_mm", "Y_mm", "Confidence", "InGoal",
-                        "Speed_kmh", "TimeToImpact_s", "Sector"
+                        "Timestamp", "X_mm", "Y_mm", "Y_Source", "Confidence", "InGoal",
+                        "Speed_kmh", "VX_mm_s", "VY_mm_s", "VZ_mm_s",
+                        "TimeToImpact_s", "Z_Start_mm", "Z_End_mm",
+                        "Detection_Latency_ms", "Total_Pipeline_ms",
+                        "Goalkeeper_Reaction_ms", "Goalkeeper_X_cmd_mm", "Goalkeeper_Y_cmd_mm",
+                        "Goalkeeper_Travel_ms",
+                        "Det_Method", "Conf_Left", "Conf_Right",
+                        "Sector"
                     ])
                     for rec in self._shot_records:
                         writer.writerow([
                             rec.get("timestamp_full", ""),
                             rec.get("x_mm", 0.0),
                             rec.get("y_mm", 0.0),
+                            rec.get("y_source", "mért"),
                             rec.get("conf", 0.0),
                             rec.get("in_goal", False),
                             rec.get("speed_kmh", 0.0),
+                            rec.get("vx_mm_s", 0.0),
+                            rec.get("vy_mm_s", 0.0),
+                            rec.get("vz_mm_s", 0.0),
                             rec.get("time_to_impact_s", 0.0),
+                            rec.get("z_start_mm", 0.0),
+                            rec.get("z_end_mm", 0.0),
+                            rec.get("detection_latency_ms", 0.0),
+                            rec.get("total_pipeline_ms", 0.0),
+                            rec.get("goalkeeper_reaction_ms", 0.0),
+                            rec.get("goalkeeper_x_cmd_mm", 0.0),
+                            rec.get("goalkeeper_y_cmd_mm", 0.0),
+                            rec.get("goalkeeper_travel_ms", 0.0),
+                            rec.get("det_method", "YOLO"),
+                            rec.get("conf_left", 0.0),
+                            rec.get("conf_right", 0.0),
                             rec.get("sector", ""),
                         ])
                 QMessageBox.information(self, "Export Sikeres", f"Lövési adatok mentve:\n{path}")
@@ -477,101 +598,358 @@ class AnalyticsDashboardWidget(QWidget):
         if not self._shot_records:
             QMessageBox.warning(self, "Nincs Adat", "Nincs menthető lövési adat!")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "HTML Jelentés Mentése", "deik_session_report.html", "HTML (*.html)")
-        if path:
-            try:
-                n = len(self._shot_records)
-                in_g = sum(1 for r in self._shot_records if r.get("in_goal", False))
-                pct = (in_g / n * 100.0) if n > 0 else 0.0
-                speeds = [r.get("speed_kmh", 0.0) for r in self._shot_records if r.get("speed_kmh", 0.0) > 0]
-                avg_spd = sum(speeds) / len(speeds) if speeds else 0.0
-                max_spd = max(speeds) if speeds else 0.0
-                times_list = [r.get("time_to_impact_s", 0.0) for r in self._shot_records if r.get("time_to_impact_s", 0.0) > 0]
-                avg_time = sum(times_list) / len(times_list) if times_list else 0.0
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Profi HTML Riport Mentése",
+            "deik_session_report.html", "HTML (*.html)"
+        )
+        if not path:
+            return
+        try:
+            html = self._build_html_report()
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+            QMessageBox.information(self, "Export Sikeres", f"Profi HTML Riport mentve:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Hiba", str(e))
 
-                html = f"""<!DOCTYPE html>
-<html>
+    def _build_html_report(self) -> str:
+        """Profi, hivatkos HTML riportot generál logóval, KPI kártyákkal és teljes telemetriával."""
+        # ── Logók base64 beágyazása ─────────────────────────────────────────
+        assets_dir = Path(__file__).parent.parent.parent / "assets"
+        def _img_b64(fname: str) -> str:
+            p = assets_dir / fname
+            if p.exists():
+                with open(p, "rb") as f:
+                    return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+            return ""
+        deik_img = _img_b64("deik_logo.png")
+        rgk_img  = _img_b64("logo.png")
+
+        # ── Statisztikák ────────────────────────────────────────────────────
+        recs = self._shot_records
+        n = len(recs)
+        in_g = sum(1 for r in recs if r.get("in_goal", False))
+        pct = in_g / n * 100 if n > 0 else 0.0
+        speeds = [r.get("speed_kmh", 0.0) for r in recs if r.get("speed_kmh", 0.0) > 0]
+        avg_spd = sum(speeds) / len(speeds) if speeds else 0.0
+        max_spd = max(speeds) if speeds else 0.0
+        min_spd = min(speeds) if speeds else 0.0
+        ttis = [r.get("time_to_impact_s", 0.0) for r in recs if r.get("time_to_impact_s", 0.0) > 0]
+        avg_tti = sum(ttis) / len(ttis) if ttis else 0.0
+        reacts = [r.get("goalkeeper_reaction_ms", 0.0) for r in recs if r.get("goalkeeper_reaction_ms", 0.0) > 0]
+        avg_react = sum(reacts) / len(reacts) if reacts else 0.0
+        pipes = [r.get("total_pipeline_ms", 0.0) for r in recs if r.get("total_pipeline_ms", 0.0) > 0]
+        avg_pipe = sum(pipes) / len(pipes) if pipes else 0.0
+        lats = [r.get("detection_latency_ms", 0.0) for r in recs if r.get("detection_latency_ms", 0.0) > 0]
+        avg_lat = sum(lats) / len(lats) if lats else 0.0
+
+        sector_counts: dict = {}
+        for r in recs:
+            s = r.get("sector", "—")
+            sector_counts[s] = sector_counts.get(s, 0) + 1
+
+        now_str = time.strftime("%Y. %m. %d. %H:%M:%S")
+
+        def rcol(ms: float) -> str:
+            if ms <= 0:  return "#94A3B8"
+            if ms <= 5:  return "#10B981"
+            if ms <= 10: return "#F59E0B"
+            return "#EF4444"
+
+        def scol(k: float) -> str:
+            if k >= 90: return "#EF4444"
+            if k >= 65: return "#F59E0B"
+            return "#10B981"
+
+        # ── Hőtérkép SVG generálás ──────────────────────────────────────────
+        GW, GH, GC, GR = 4000.0, 2000.0, 8, 4
+        grid = [[0]*GC for _ in range(GR)]
+        for r in recs:
+            col_i = max(0, min(GC-1, int((r.get("x_mm",0) + GW/2) / GW * GC)))
+            row_i = max(0, min(GR-1, int((1 - r.get("y_mm",0)/GH) * GR)))
+            grid[row_i][col_i] += 1
+        mg_val = max(max(row) for row in grid) or 1
+        SVG_W, SVG_H, MG = 520, 240, 24
+        gw_px = SVG_W - 2*MG; gh_px = SVG_H - 2*MG
+        cw = gw_px / GC; ch = gh_px / GR
+
+        def heat_col(v: int):
+            if v == 0: return "#060C14", 0.0
+            p = v / mg_val
+            if p < 0.33: return "rgb(30,144,255)", 0.4 + p*1.5
+            if p < 0.66: return "rgb(255,200,0)", 0.5 + p
+            return "rgb(239,68,68)", 0.7 + p*0.3
+
+        cells = ""
+        for ri in range(GR):
+            for ci in range(GC):
+                cnt = grid[ri][ci]; cf, op = heat_col(cnt)
+                x0 = MG + ci*cw; y0 = MG + ri*ch
+                cells += (f'<rect x="{x0:.1f}" y="{y0:.1f}" width="{cw:.1f}" height="{ch:.1f}" '
+                          f'fill="{cf}" opacity="{op:.2f}" stroke="#1A3526" stroke-width="0.5"/>')
+                if cnt > 0:
+                    cells += (f'<text x="{x0+cw/2:.1f}" y="{y0+ch/2+5:.1f}" '
+                               f'text-anchor="middle" font-size="14" font-weight="bold" fill="white">{cnt}</text>')
+
+        dots = ""
+        for r in recs:
+            sx = MG + (r.get("x_mm",0) + GW/2) / GW * gw_px
+            sy = MG + (1 - r.get("y_mm",0)/GH) * gh_px
+            color = "#10B981" if r.get("in_goal") else "#EF4444"
+            dots += f'<circle cx="{sx:.1f}" cy="{sy:.1f}" r="5.5" fill="{color}" stroke="white" stroke-width="1.5" opacity="0.9"/>'
+
+        # ── Szektor sávok ───────────────────────────────────────────────────
+        sector_bars = ""
+        for sec, cnt in sorted(sector_counts.items(), key=lambda x: -x[1]):
+            p = cnt / n * 100 if n > 0 else 0
+            sector_bars += (f'<div class="sr"><span class="sn">{sec}</span>'
+                            f'<div class="sbw"><div class="sb" style="width:{p:.0f}%"></div></div>'
+                            f'<span class="sc">{cnt} ({p:.0f}%)</span></div>')
+
+        # ── Sebességprofil bárok ────────────────────────────────────────────
+        speed_bars = ""
+        for idx, r in enumerate(recs, 1):
+            spd = r.get("speed_kmh", 0.0)
+            pw = min(100, spd / 120 * 100)
+            if spd >= 90:   bc = "linear-gradient(90deg,#DC2626,#EF4444)"
+            elif spd >= 65: bc = "linear-gradient(90deg,#D97706,#F59E0B)"
+            else:           bc = "linear-gradient(90deg,#059669,#10B981)"
+            mk = " ✓" if r.get("in_goal") else " ✕"
+            speed_bars += (f'<div class="si"><span class="snum">#{idx}</span>'
+                           f'<div class="sbw"><div class="spb" style="width:{pw:.0f}%;background:{bc};">'
+                           f'<span>{spd:.1f} km/h{mk}</span></div></div>'
+                           f'<span class="sts">{r.get("timestamp","")}</span></div>')
+
+        # ── Lövési tábla sorok ──────────────────────────────────────────────
+        rows_html = ""
+        for idx, r in enumerate(recs, 1):
+            ig = r.get("in_goal", False)
+            res_cls = "in-goal" if ig else "missed"
+            res_txt = "KAPUBAN ✓" if ig else "MELLÉ ✕"
+            y_src = r.get("y_source", "")
+            yb = ('<span class="badge badge-pred">⬡ pred</span>' if y_src == "pred"
+                  else '<span class="badge badge-mert">mért</span>')
+            spd  = r.get("speed_kmh", 0.0)
+            tti  = r.get("time_to_impact_s", 0.0)
+            dlat = r.get("detection_latency_ms", 0.0)
+            pipe = r.get("total_pipeline_ms", 0.0)
+            react= r.get("goalkeeper_reaction_ms", 0.0)
+            gx   = r.get("goalkeeper_x_cmd_mm", 0.0)
+            gy   = r.get("goalkeeper_y_cmd_mm", 0.0)
+            rows_html += (
+                f'<tr><td class="num">{idx}</td><td>{r.get("timestamp","")}</td>'
+                f'<td class="mono" style="color:#60A5FA;">{r.get("x_mm",0):+.0f}</td>'
+                f'<td class="mono">{r.get("y_mm",0):.0f} {yb}</td>'
+                f'<td class="mono" style="color:{scol(spd)};font-weight:700;">{spd:.1f} km/h</td>'
+                f'<td class="mono">{tti:.3f} s</td>'
+                f'<td class="mono">{dlat:.1f} ms</td>'
+                f'<td class="mono">{pipe:.1f} ms</td>'
+                f'<td class="mono" style="color:{rcol(react)};font-weight:700;">{react:.1f} ms</td>'
+                f'<td class="mono">{gx:+.0f} / {gy:.0f}</td>'
+                f'<td>{r.get("det_method","—")}</td>'
+                f'<td>{r.get("sector","—")}</td>'
+                f'<td class="{res_cls}">{res_txt}</td></tr>'
+            )
+
+        # ── Logó HTML ───────────────────────────────────────────────────────
+        deik_tag = f'<img src="{deik_img}" alt="DE logó">' if deik_img else \
+                   '<div style="width:88px;height:88px;background:#1E3A2F;border-radius:8px;"></div>'
+        rgk_tag  = f'<img src="{rgk_img}" alt="RGK logó" style="height:78px;">' if rgk_img else ""
+        ftr_logo = f'<img src="{deik_img}" alt="DEIK" class="ftr-logo">' if deik_img else ""
+
+        # ── Összefűzés ──────────────────────────────────────────────────────
+        return f"""<!DOCTYPE html>
+<html lang="hu">
 <head>
-    <meta charset="utf-8">
-    <title>DEIK Robot Kapus – Munkamenet Riport</title>
-    <style>
-        body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #0B0F17; color: #F8FAFC; margin: 20px; }}
-        h1 {{ color: #4ADE80; border-bottom: 2px solid #10B981; padding-bottom: 8px; }}
-        .card {{ background: #151D2A; border: 1px solid #26334D; padding: 15px; border-radius: 8px; margin-bottom: 15px; }}
-        .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }}
-        .stat-item {{ background: #1E293B; padding: 12px; border-radius: 6px; text-align: center; }}
-        .stat-value {{ font-size: 24px; font-weight: 900; color: #4ADE80; }}
-        .stat-label {{ font-size: 11px; color: #94A3B8; margin-top: 4px; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-        th, td {{ padding: 8px 12px; border: 1px solid #26334D; text-align: left; }}
-        th {{ background: #0F5132; color: white; }}
-        tr:nth-child(even) {{ background: #1E293B; }}
-        .in-goal {{ color: #4ADE80; font-weight: bold; }}
-        .missed {{ color: #EF4444; font-weight: bold; }}
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>DEIK Robot Kapus – Edzés Munkamenet Riport</title>
+<style>
+:root{{--bg:#080E19;--sf:#0F1A27;--sf2:#172030;--bd:#1A3528;--gp:#10B981;--glt:#4ADE80;
+--gd:#F59E0B;--gdl:#FCD34D;--bl:#60A5FA;--rd:#EF4444;--tx:#F1F5F9;--tm:#94A3B8;--td:#475569;--r:12px;}}
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0;}}
+body{{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--tx);}}
+.hdr{{background:linear-gradient(135deg,#071510 0%,#0C2016 60%,#050E0A 100%);border-bottom:3px solid var(--gp);}}
+.hdr-i{{max-width:1400px;margin:0 auto;padding:30px 48px;display:flex;align-items:center;gap:32px;}}
+.hdr-logos{{display:flex;align-items:center;gap:18px;flex-shrink:0;}}
+.hdr-logos img{{height:88px;width:auto;}}
+.ldiv{{width:2px;height:68px;background:linear-gradient(to bottom,transparent,#10B981,transparent);opacity:.45;}}
+.hdr-t{{flex:1;}}.hdr-t .sup{{font-size:10px;font-weight:700;letter-spacing:3.5px;text-transform:uppercase;color:var(--glt);opacity:.75;margin-bottom:5px;}}
+.hdr-t h1{{font-size:26px;font-weight:900;color:var(--tx);line-height:1.15;margin-bottom:8px;}}
+.hdr-t h1 span{{color:var(--gp);}}.hdr-t .sub{{font-size:13px;color:var(--tm);}}
+.hdr-m{{display:flex;flex-direction:column;align-items:flex-end;gap:7px;flex-shrink:0;}}
+.chip{{background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);border-radius:20px;padding:4px 14px;font-size:11px;color:var(--glt);font-weight:700;}}
+.mdate{{font-size:12px;color:var(--tm);font-family:'Courier New',monospace;}}
+.msess{{font-size:10px;color:var(--td);font-family:'Courier New',monospace;}}
+.sbadge{{background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);border-radius:6px;padding:4px 10px;font-size:10px;color:var(--gp);font-family:'Courier New',monospace;font-weight:700;}}
+.con{{max-width:1400px;margin:0 auto;padding:40px 48px;}}
+.stitle{{font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--gp);margin-bottom:18px;display:flex;align-items:center;gap:12px;}}
+.stitle::after{{content:'';flex:1;height:1px;background:linear-gradient(to right,var(--bd),transparent);}}
+.kpi{{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-bottom:36px;}}
+.kc{{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:18px 14px;text-align:center;position:relative;overflow:hidden;}}
+.kc::before{{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:var(--r) var(--r) 0 0;}}
+.kc.g::before{{background:var(--gp);}}.kc.a::before{{background:var(--gd);}}.kc.b::before{{background:var(--bl);}}
+.kc.r::before{{background:var(--rd);}}.kc.t::before{{background:#06B6D4;}}.kc.p::before{{background:#A78BFA;}}
+.ki{{font-size:20px;margin-bottom:7px;display:block;}}.kv{{font-size:24px;font-weight:900;line-height:1;margin-bottom:4px;font-family:'Courier New',monospace;}}
+.kc.g .kv{{color:var(--glt);}}.kc.a .kv{{color:var(--gdl);}}.kc.b .kv{{color:var(--bl);}}
+.kc.r .kv{{color:#FCA5A5;}}.kc.t .kv{{color:#67E8F9;}}.kc.p .kv{{color:#C4B5FD;}}
+.kl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--td);}}
+.tc{{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-bottom:36px;}}
+.pnl{{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:26px;}}
+.pnl-t{{font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--gp);margin-bottom:18px;padding-bottom:10px;border-bottom:1px solid var(--bd);}}
+.hmw{{border-radius:8px;overflow:hidden;background:#060C14;border:1px solid var(--bd);}}
+.hml{{font-size:9px;color:var(--tm);text-align:center;padding:5px 0 3px;font-weight:700;letter-spacing:1px;text-transform:uppercase;}}
+.hmgl{{display:flex;justify-content:space-between;padding:2px 24px;font-size:9px;color:var(--td);font-family:'Courier New',monospace;}}
+.hmleg{{margin-top:9px;display:flex;gap:16px;font-size:11px;}}
+.sr{{display:flex;align-items:center;gap:10px;margin-bottom:9px;}}
+.sn{{font-size:11px;color:var(--tm);width:95px;flex-shrink:0;font-weight:600;}}
+.sbw{{flex:1;height:17px;background:var(--sf2);border-radius:3px;overflow:hidden;}}
+.sb{{height:100%;background:linear-gradient(90deg,#10B981,#4ADE80);border-radius:3px;}}
+.sc{{font-size:11px;color:var(--glt);font-family:'Courier New',monospace;width:58px;text-align:right;font-weight:700;}}
+.stat-t{{width:100%;border-collapse:collapse;}}
+.stat-t td{{padding:7px 4px;border-bottom:1px solid var(--bd);font-size:12px;}}
+.stat-t td:first-child{{color:var(--tm);font-size:11px;}}.stat-t td:last-child{{text-align:right;font-family:'Courier New',monospace;font-weight:700;color:var(--glt);}}
+.spd-pnl{{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:26px;margin-bottom:36px;}}
+.si{{display:flex;align-items:center;gap:10px;margin-bottom:8px;}}
+.snum{{font-size:10px;color:var(--td);font-family:'Courier New',monospace;width:26px;text-align:right;}}
+.spb{{height:22px;border-radius:4px;display:flex;align-items:center;padding-left:8px;}}
+.spb span{{font-size:11px;font-weight:700;color:white;font-family:'Courier New',monospace;}}
+.sts{{font-size:10px;color:var(--td);width:75px;text-align:right;font-family:'Courier New',monospace;}}
+.tw{{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);overflow:hidden;margin-bottom:40px;}}
+.th{{padding:18px 22px 14px;border-bottom:1px solid var(--bd);display:flex;align-items:center;justify-content:space-between;}}
+.th-t{{font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--gp);}}
+.tbadge{{background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.3);border-radius:12px;padding:3px 12px;font-size:10px;color:var(--glt);font-weight:700;}}
+table.sht{{width:100%;border-collapse:collapse;}}
+table.sht thead tr{{background:#0A1610;}}
+table.sht th{{padding:9px 11px;text-align:left;font-size:9px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:var(--td);border-bottom:1px solid var(--bd);white-space:nowrap;}}
+table.sht td{{padding:9px 11px;font-size:11px;border-bottom:1px solid rgba(26,53,40,.5);vertical-align:middle;}}
+table.sht tr:last-child td{{border-bottom:none;}}
+table.sht tr:hover td{{background:rgba(16,185,129,.04);}}
+table.sht tr:nth-child(even) td{{background:rgba(8,12,20,.5);}}
+table.sht .num{{color:var(--td);font-family:'Courier New',monospace;text-align:center;}}
+table.sht .mono{{font-family:'Courier New',monospace;}}
+table.sht .in-goal{{color:var(--glt);font-weight:700;}}
+table.sht .missed{{color:var(--rd);font-weight:700;}}
+.badge{{display:inline-block;font-size:8px;font-weight:700;letter-spacing:.5px;border-radius:3px;padding:1px 5px;vertical-align:middle;margin-left:3px;text-transform:uppercase;}}
+.badge-pred{{background:rgba(16,185,129,.22);color:#4ADE80;border:1px solid rgba(74,222,128,.25);}}
+.badge-mert{{background:rgba(148,163,184,.12);color:#94A3B8;border:1px solid rgba(148,163,184,.2);}}
+.ftr{{border-top:1px solid var(--bd);background:#050A12;padding:26px 48px;}}
+.ftr-i{{max-width:1400px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:20px;}}
+.ftr-l{{font-size:12px;color:var(--td);line-height:1.7;}}.ftr-l strong{{color:var(--tm);}}
+.ftr-r{{font-size:10px;color:var(--td);text-align:right;font-family:'Courier New',monospace;line-height:1.7;}}
+.ftr-logo{{height:34px;opacity:.45;}}
+</style>
 </head>
 <body>
-    <h1>⚽ DEIK Robot Kapus – Edzés & Munkamenet Riport</h1>
-    <div class="card">
-        <h3>Dátum: {time.strftime('%Y-%m-%d %H:%M:%S')}</h3>
-        <div class="stats-grid">
-            <div class="stat-item">
-                <div class="stat-value">{n}</div>
-                <div class="stat-label">ÖSSZES LÖVÉS</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value">{in_g} ({pct:.0f}%)</div>
-                <div class="stat-label">KAPUT TALÁLT</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value">{avg_spd:.1f} km/h</div>
-                <div class="stat-label">ÁTLAG SEBESSÉG</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value">{max_spd:.1f} km/h</div>
-                <div class="stat-label">MAX SEBESSÉG</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value">{avg_time:.3f} mp</div>
-                <div class="stat-label">ÁTLAG BECSAPÓDÁSI IDŐ</div>
-            </div>
-            <div class="stat-item">
-                <div class="stat-value">{n - in_g}</div>
-                <div class="stat-label">MELLÉ MENT</div>
-            </div>
-        </div>
+<header class="hdr">
+  <div class="hdr-i">
+    <div class="hdr-logos">
+      {deik_tag}
+      <div class="ldiv"></div>
+      {rgk_tag}
     </div>
-    <div class="card">
-        <h3>Lövési Lista</h3>
-        <table>
-            <tr><th>#</th><th>Időpont</th><th>X (mm)</th><th>Y (mm)</th><th>Sebesség</th><th>Becsap. Idő</th><th>Szektor</th><th>Eredmény</th></tr>
-"""
-                for idx, rec in enumerate(self._shot_records, 1):
-                    ig = rec.get("in_goal", False)
-                    res_cls = "in-goal" if ig else "missed"
-                    res_txt = "KAPUBAN ✓" if ig else "MELLÉ ✕"
-                    spd = rec.get("speed_kmh", 0.0)
-                    tti = rec.get("time_to_impact_s", 0.0)
-                    html += (
-                        f"<tr><td>{idx}</td>"
-                        f"<td>{rec.get('timestamp', '')}</td>"
-                        f"<td>{rec.get('x_mm', 0):+.0f}</td>"
-                        f"<td>{rec.get('y_mm', 0):.0f}</td>"
-                        f"<td>{spd:.1f} km/h</td>"
-                        f"<td>{tti:.3f} mp</td>"
-                        f"<td>{rec.get('sector', '')}</td>"
-                        f"<td class=\"{res_cls}\">{res_txt}</td></tr>\n"
-                    )
-
-                html += """        </table>
+    <div class="hdr-t">
+      <div class="sup">Debreceni Egyetem Informatikai Kar</div>
+      <h1>Robot Kapus Rendszer<br><span>Edzés Munkamenet Riport</span></h1>
+      <div class="sub">Valós idejű sztereó látórendszer &nbsp;·&nbsp; YOLOv8 &nbsp;·&nbsp; Ballisztikus trajektória előrejelzés</div>
     </div>
+    <div class="hdr-m">
+      <div class="chip">⚡ AUTOMATIKUS GENERÁLÁS</div>
+      <div class="mdate">{now_str}</div>
+      <div class="msess">{n} lövés rögzítve</div>
+      <div class="sbadge">🤖 DEIK-RGK v1.0</div>
+    </div>
+  </div>
+</header>
+<main class="con">
+  <p class="stitle">Munkamenet Összesítő</p>
+  <div class="kpi">
+    <div class="kc g"><span class="ki">⚽</span><div class="kv">{n}</div><div class="kl">Összes Lövés</div></div>
+    <div class="kc a"><span class="ki">🎯</span><div class="kv">{in_g} <span style="font-size:13px">({pct:.0f}%)</span></div><div class="kl">Kaput Talált</div></div>
+    <div class="kc b"><span class="ki">💨</span><div class="kv">{avg_spd:.1f}<span style="font-size:12px"> km/h</span></div><div class="kl">Átlag Sebesség</div></div>
+    <div class="kc r"><span class="ki">🚀</span><div class="kv">{max_spd:.1f}<span style="font-size:12px"> km/h</span></div><div class="kl">Max Sebesség</div></div>
+    <div class="kc t"><span class="ki">⏱</span><div class="kv">{avg_react:.1f}<span style="font-size:12px"> ms</span></div><div class="kl">Átl. Kapus Reakció</div></div>
+    <div class="kc p"><span class="ki">🔬</span><div class="kv">{avg_pipe:.1f}<span style="font-size:12px"> ms</span></div><div class="kl">Átl. Pipeline</div></div>
+  </div>
+  <div class="tc">
+    <div class="pnl">
+      <div class="pnl-t">🟥 Lövési Hőtérkép – Kapu Rácsanalízis</div>
+      <div class="hmw">
+        <div class="hml">KAPU NÉZET (elölről)</div>
+        <svg width="100%" viewBox="0 0 {SVG_W} {SVG_H}" xmlns="http://www.w3.org/2000/svg">
+          <rect width="{SVG_W}" height="{SVG_H}" fill="#060C14"/>
+          {cells}
+          <rect x="{MG}" y="{MG}" width="{gw_px}" height="{gh_px}" fill="none" stroke="#10B981" stroke-width="2.5"/>
+          <line x1="{MG}" y1="{MG}" x2="{MG}" y2="{MG+gh_px}" stroke="#4ADE80" stroke-width="5"/>
+          <line x1="{MG+gw_px}" y1="{MG}" x2="{MG+gw_px}" y2="{MG+gh_px}" stroke="#4ADE80" stroke-width="5"/>
+          <line x1="{MG}" y1="{MG}" x2="{MG+gw_px}" y2="{MG}" stroke="#4ADE80" stroke-width="5"/>
+          <line x1="{MG}" y1="{MG+gh_px/2:.1f}" x2="{MG+gw_px}" y2="{MG+gh_px/2:.1f}" stroke="#1A3526" stroke-width="1" stroke-dasharray="5,5"/>
+          <line x1="{MG+gw_px/2:.1f}" y1="{MG}" x2="{MG+gw_px/2:.1f}" y2="{MG+gh_px}" stroke="#1A3526" stroke-width="1" stroke-dasharray="5,5"/>
+          {dots}
+          <text x="{MG+8}" y="{SVG_H-6}" font-size="9" fill="#475569" font-family="monospace">BAL</text>
+          <text x="{MG+gw_px-30}" y="{SVG_H-6}" font-size="9" fill="#475569" font-family="monospace">JOBB</text>
+          <text x="{MG+gw_px/2:.1f}" y="{SVG_H-6}" font-size="9" fill="#475569" font-family="monospace" text-anchor="middle">KÖZÉP</text>
+        </svg>
+        <div class="hmgl"><span>−2000 mm</span><span>0</span><span>+2000 mm</span></div>
+      </div>
+      <div class="hmleg"><span style="color:#10B981;">● Kapuban</span><span style="color:#EF4444;">● Mellé</span><span style="color:#94A3B8;font-size:10px;">⬡ = ballisztikus pred.</span></div>
+    </div>
+    <div class="pnl">
+      <div class="pnl-t">📊 Szektor Eloszlás</div>
+      {sector_bars}
+      <div style="margin-top:22px;">
+        <div class="pnl-t" style="margin-top:0;">📈 Teljesítmény Összesítő</div>
+        <table class="stat-t">
+          <tr><td>Min. sebesség</td><td>{min_spd:.1f} km/h</td></tr>
+          <tr><td>Max. sebesség</td><td>{max_spd:.1f} km/h</td></tr>
+          <tr><td>Átl. becsapódási idő</td><td>{avg_tti:.3f} s</td></tr>
+          <tr><td>Átl. YOLO latencia</td><td>{avg_lat:.1f} ms</td></tr>
+          <tr><td>Átl. pipeline késleltetés</td><td>{avg_pipe:.1f} ms</td></tr>
+          <tr><td>Átl. kapus reakcióidő</td><td>{avg_react:.1f} ms</td></tr>
+          <tr><td>Kapuban talált</td><td>{in_g} / {n} ({pct:.0f}%)</td></tr>
+          <tr><td>Mellé ment</td><td>{n-in_g} / {n} ({100-pct:.0f}%)</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="spd-pnl">
+    <div class="pnl-t">💨 Lövési Sebességprofil – Munkamenet Kronológia</div>
+    {speed_bars}
+  </div>
+  <p class="stitle">Részletes Lövési Napló – Teljes Telemetria</p>
+  <div class="tw">
+    <div class="th"><span class="th-t">📋 Lövés-szintű Telemetria Adatok</span><span class="tbadge">{n} bejegyzés</span></div>
+    <div style="overflow-x:auto;">
+    <table class="sht">
+      <thead><tr>
+        <th>#</th><th>Időpont</th><th>X (mm)</th><th>Y (mm)</th><th>Sebesség</th>
+        <th>Becsap. Idő</th><th>Det. Latencia</th><th>Pipeline</th><th>Kapus Reakció</th>
+        <th>Kapus Cél (X/Y)</th><th>Módszer</th><th>Szektor</th><th>Eredmény</th>
+      </tr></thead>
+      <tbody>{rows_html}</tbody>
+    </table>
+    </div>
+  </div>
+</main>
+<footer class="ftr">
+  <div class="ftr-i">
+    <div class="ftr-l">
+      <strong>DEIK Robot Foci Kapus Projekt</strong> – Debreceni Egyetem Informatikai Kar (2026)<br>
+      Fejlesztők: <strong>Morvai Roland</strong> &nbsp;·&nbsp; <strong>Rácz Donát</strong> – BSc Mérnökinformatikus<br>
+      Rendszer: YOLOv8 &nbsp;·&nbsp; Python 3.12 &nbsp;·&nbsp; PyQt6 &nbsp;·&nbsp; OpenCV &nbsp;·&nbsp; CUDA (RTX 3050)
+    </div>
+    {ftr_logo}
+    <div class="ftr-r">
+      Generálva: {now_str}<br>
+      {n} lövés rögzítve<br>
+      <span style="color:#10B981;">● DEIK-RGK v1.0</span>
+    </div>
+  </div>
+</footer>
 </body>
 </html>"""
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(html)
-                QMessageBox.information(self, "Export Sikeres", f"HTML Riport mentve:\n{path}")
-            except Exception as e:
-                QMessageBox.critical(self, "Export Hiba", str(e))
+
+
 
     def _apply_theme(self) -> None:
         dark = self._dark

@@ -4,7 +4,7 @@ GPIO MASTER Teszt – Opto-izolált mód
 Pin 3 (Zöld/OUT1) → XI_GPO_PORT1 → XI_GPO_EXPOSURE_ACTIVE
 
 Futtatás:
-    python3 gpio_test_master.py
+    python tools/gpio_test_master.py
 
 Közben mérd (V DC állásban):
     MASTER kábel Zöld ér (Pin 3) ↔ Sárga ér (Pin 4 / OUT-GND)
@@ -76,7 +76,7 @@ def main():
         logger.info("  Elvart: ~0.9-1.0V DC atlag (87Hz, 3ms expo)")
         logger.info("")
         logger.info("  VAGY olvass GPI szintet a masik terminalban:")
-        logger.info("  python3 gpio_read_level.py")
+        logger.info("  python tools/gpio_read_level.py")
         logger.info("=" * 55)
         logger.info("")
 

@@ -4,12 +4,12 @@ GPIO SLAVE Teszt – GPI szint leolvasása
 Ez a szkript CSAK a SLAVE kamerát nyitja meg és figyeli
 a Pin 8 (Piros/INOUT1) bemeneti szintjét.
 
-FONTOS: Közben futtasd a gpio_test_master.py szkriptet is
+FONTOS: Közben futtasd a tools/gpio_test_master.py szkriptet is
         egy másik terminálban! (MASTER kell a jelhez)
 
 Futtatás (2 terminálban párhuzamosan):
-    Terminal 1: python gpio_test_master.py
-    Terminal 2: python gpio_test_slave.py
+    Terminal 1: python tools/gpio_test_master.py
+    Terminal 2: python tools/gpio_test_slave.py
 
 Várható kimenet:
     GPI level: 0 vagy 1 váltakozva (87 Hz-es jel)
@@ -49,7 +49,7 @@ def main():
     logger.info("=" * 55)
     logger.info("SLAVE sorozatszám: %s", SLAVE_SERIAL)
     logger.info("")
-    logger.info("FONTOS: Futtasd párhuzamosan: python gpio_test_master.py")
+    logger.info("FONTOS: Futtasd párhuzamosan: python tools/gpio_test_master.py")
     logger.info("        és kösd össze a kábeleket (Piros<->Piros, Kek<->Kek)")
     logger.info("")
 

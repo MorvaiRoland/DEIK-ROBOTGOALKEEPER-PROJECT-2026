@@ -3,7 +3,7 @@ GPI szint közvetlen leolvasása – Opto-izolált mód diagnosztika
 ================================================================
 Figyeli a Pin 5 (Szurke/IN1) = XI_GPI_PORT1 bemenetet.
 
-Futtasd KÖZBEN a gpio_test_master.py-t egy masik terminalban!
+Futtasd KÖZBEN a python tools/gpio_test_master.py-t egy masik terminalban!
 Kabel bekotve: MASTER Pin3(Zold) → SLAVE Pin5(Szurke)
                MASTER Pin4(Sarga) → SLAVE Pin6(Rozsaszin)
                MASTER Pin7(Kek) ↔ SLAVE Pin7(Kek)
@@ -65,7 +65,7 @@ if levels:
     if ones > 0 and zeros > 0:
         print(f"\n✅ JEL ERKEZETT! A SLAVE IN1 pin (PORT1) erzekeli a MASTER OUT1 jelet!")
         print(f"   Becsult duty cycle: ~{pct}% (elvart ~26%)")
-        print(f"   → Futtasd: python3 gpio_test_slave.py a trigger teszthez!")
+        print(f"   → Futtasd: python tools/gpio_test_slave.py a trigger teszthez!")
     elif ones == 0:
         print(f"\n❌ Mindig LOW – az opto-izolator nem kap aram ellatest.")
         print(f"   Megoldas: kell egy kulso 5V + ~1kΩ ellenallas a korbe,")

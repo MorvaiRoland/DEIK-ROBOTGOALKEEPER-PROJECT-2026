@@ -28,9 +28,11 @@ env/
 .coverage
 htmlcov/
 
-# Naplófájlok
-*.log
-data/goalkeeper.log
+# Naplófájlok és generált jelentések
+*.log*
+data/*.log*
+data/*.html
+data/goalkeeper.log*
 
 # YOLO / AI modell fájlok (nagy fájlok – külön letöltendők)
 models/*.pt
