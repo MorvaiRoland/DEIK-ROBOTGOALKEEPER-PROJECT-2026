@@ -197,6 +197,16 @@ class XimeaCamera(BaseCamera):
         self._cam: Optional[xiapi.Camera] = None
         self._xi_image: Optional[xiapi.Image] = None
 
+        # A ténylegesen kért ROI méret (_configure_camera töltis ki). A leadott
+        # frame-eket ehhez vágjuk, mert a szenzor/driver a beállított OffsetX
+        # mellett néha a natív szélesség pereméig ad vissza pixeleket
+        # (Width regiszter figyelmen kívül marad OffsetX!=0 esetén) – a
+        # get_width() ekkor még helyesen a kért méretet mutatja, csak a
+        # ténylegesen leadott frame szélesebb.
+        self._roi_width: Optional[int] = None
+        self._roi_height: Optional[int] = None
+        self._roi_mismatch_warned = False
+
         # Thread-safe ring buffer a frame-eknek
         self._buffer: deque = deque(maxlen=_RING_BUFFER_SIZE)
         self._buffer_lock = threading.Lock()
@@ -336,6 +346,17 @@ class XimeaCamera(BaseCamera):
         self._cam.set_gain(self._gain_db)
         logger.debug("  Erősítés: %.1f dB", self._gain_db)
 
+        # --- Képformátum ---
+        # FONTOS: ezt a ROI (width/height/offset) beállítása ELŐTT kell hívni!
+        # A pixelformátum (pl. XI_RGB24) megváltoztatása a szenzor tényleges
+        # readout-szélességét is megváltoztathatja (más lépésköz/igazítás),
+        # ezért ha a ROI-t korábban állítjuk be és csak utána váltunk formátumot,
+        # a korábban lekérdezett/naplózott width/height már ELAVULT lesz, és a
+        # ténylegesen kapott képkockák szélessége eltér a naplózott/kért mérettől
+        # (pl. 1816 helyett 1880 – ez okozott hibás sztereó kalibrálást).
+        # XI_RGB24 = Ximea 24-bites színes formátum (OpenCV-hez BGR sorrendben)
+        self._cam.set_imgdataformat("XI_RGB24")
+
         # --- Képfelbontás (ROI - Region of Interest) ---
         # Ha csökkentjük a felbontást, megnő a maximális FPS az USB sávszélesség korlátai miatt.
         res_cfg = self._config.get("resolution", {})
@@ -361,6 +382,8 @@ class XimeaCamera(BaseCamera):
         # Kért méret lépésközre kerekítve és a szenzor méretére vágva.
         width  = min((target_w // w_inc) * w_inc, native_w)
         height = min((target_h // h_inc) * h_inc, native_h)
+        self._roi_width  = width
+        self._roi_height = height
 
         # Középre igazítás, offset lépésközre kerekítve.
         offset_x = ((native_w - width)  // 2 // ox_inc) * ox_inc
@@ -411,12 +434,6 @@ class XimeaCamera(BaseCamera):
                 )
         except Exception as exc:
             logger.warning("  ROI beállítási hiba: %s", exc)
-
-        # --- Képformátum ---
-        # A formatum megváltoztathatja a lehetséges frame rate-et, ezért ezt
-        # a sávszélesség- és FPS-paraméterek ELŐTT kell beállítani.
-        # XI_RGB24 = Ximea 24-bites színes formátum (OpenCV-hez BGR sorrendben)
-        self._cam.set_imgdataformat("XI_RGB24")
 
         # --- USB3 sávszélesség ---
         # XI_PRM_LIMIT_BANDWIDTH egysége Mbit/s, nem MB/s. Külön 5 Gbit/s
@@ -641,7 +658,7 @@ class XimeaCamera(BaseCamera):
             # A Pin 8/INOUT1 (PORT2) bidirekcionális, 4k7 soros védelemmel (Figure 68).
             # High-Z beállítás megpróbálható; ha az SDK nem támogatja, a try/except
             # logol, de a szinkron attól még működhet (a 4k7 soros ellenállás véd).
-            # MEGJEGYZÉS: Dedikált OUT-only pineken (Section 2.10.2) High-Z NEM támogatott
+            # Megjegyzés: Dedikált OUT-only pineken (Section 2.10.2) High-Z NEM támogatott
             # (unidirectionális szintfordító miatt) – ott az except ág fog futni.
             try:
                 self._cam.set_gpo_selector(gpi_selector.replace("GPI", "GPO"))
@@ -830,11 +847,30 @@ class XimeaCamera(BaseCamera):
                     )
 
                 # NumPy tömbbé alakítás
-                # MEGJEGYZÉS: A Ximea XI_RGB24 formátum BGR byte-sorrendben adja a pixeleket,
+                # Megjegyzés: a Ximea XI_RGB24 formátum BGR byte-sorrendben adja a pixeleket,
                 # ami az OpenCV natív formátuma. NEM kell COLOR_RGB2BGR konverzió!
                 # (Korábbi COLOR_RGB2BGR hívás HIBÁSAN megcserélte a piros és kék csatornákat,
                 #  ezért jelent meg a narancssárga labda kékként.)
                 bgr_image = self._xi_image.get_image_data_numpy()
+
+                # Védekező vágás: a driver OffsetX!=0 esetén néha a natív
+                # szenzor-szélig ad vissza pixeleket a beállított Width helyett
+                # (get_width() ekkor még helyesen a kért méretet mutatja).
+                # Ha a leadott frame szélesebb/magasabb a kértnél, levágjuk a
+                # bal-felső sarokból a kért méretre, hogy a downstream kód
+                # (kalibrálás, detekció) mindig a konfigurált geometriát lássa.
+                if self._roi_width and self._roi_height:
+                    h_actual, w_actual = bgr_image.shape[:2]
+                    if w_actual != self._roi_width or h_actual != self._roi_height:
+                        if not self._roi_mismatch_warned:
+                            logger.warning(
+                                "  Leadott frame méret (%dx%d) eltér a beállított ROI-tól "
+                                "(%dx%d) – levágás a kért méretre. (%s)",
+                                w_actual, h_actual, self._roi_width, self._roi_height,
+                                self._info.name,
+                            )
+                            self._roi_mismatch_warned = True
+                        bgr_image = bgr_image[:self._roi_height, :self._roi_width]
 
                 # Alkalmazzuk az X/Y elmozdulást, tükrözést és elforgatást
                 bgr_image = self.apply_image_transformations(bgr_image)
@@ -892,7 +928,7 @@ class XimeaCamera(BaseCamera):
                     temp = self.get_temperature()
                     if temp > _TEMPERATURE_WARNING_THRESHOLD:
                         logger.warning(
-                            "FIGYELEM: Magas kamera hőmérséklet: %.1f°C (%s)",
+                            "Magas kamera hőmérséklet: %.1f°C (%s) – képalkotó károsodása lehet!",
                             temp, self._info.name
                         )
 

@@ -142,15 +142,13 @@ A projekt a tiszta architektúra és a professzionális Python fejlesztési szab
 
 ```
 DEIK-ROBOTGOALKEEPER-PROJECT-2026/
-├── pyproject.toml                     ← PEP 517/518/621 projekt konfiguráció és metaadatok
-├── pytest.ini                         ← Pytest futtató konfiguráció (pythonpath = src)
+├── pyproject.toml                     ← PEP 517/518/621 projekt konfiguráció és Pytest beállítások
 ├── requirements.txt                   ← Python függőségek listája
-├── setup.sh                           ← Automatikus környezeti telepítő szkript
-├── run.sh                             ← Fő rendszerindító szkript (USBFS ellenőrzéssel)
-├── launch_desktop.sh                  ← Asztali parancsikon indító szkript
-├── DEIK-Robot-Kapus.spec              ← PyInstaller építési specifikáció
+├── run.sh                             ← Fő rendszerindító szkript (USBFS ellenőrzéssel) 🚀
 ├── LICENSE                            ← GPLv3 licenc fájl
 ├── README.md                          ← Rendszer dokumentáció (Ez a fájl)
+├── packaging/                         ← Csomagolási és építési fájlok 📦
+│   └── DEIK-Robot-Kapus.spec          ← PyInstaller építési specifikáció
 ├── config/
 │   ├── config.yaml                    ← Fő rendszerkonfiguráció ⚙️
 │   └── gui_settings.json              ← Helyi felületi állapotmentések
@@ -192,12 +190,14 @@ DEIK-ROBOTGOALKEEPER-PROJECT-2026/
 │   ├── multimeter_test.py             ← Kézi multiméteres feszültségmérő szkript (3.3V)
 │   └── test_bidir_ports.py            ← Kétirányú GPIO vonal tesztelő
 ├── scripts/                           ← Operatív segédszkriptek és beállítók
+│   ├── setup.sh                       ← Automatikus környezeti telepítő szkript
+│   ├── launch_desktop.sh              ← Asztali parancsikon indító szkript
+│   ├── setup_usbfs_memory.sh          ← Linux USBFS memóriabuffer növelő (2048 MB)
 │   ├── calibrate_stereo.py            ← Parancssori sztereó sakktábla/ChArUco kalibráló
 │   ├── calibrate_world.py             ← Pálya világkoordináta-rendszer kalibráló
 │   ├── pick_world_points.py           ← Interaktív pontkijelölő a világkoordinátákhoz
 │   ├── test_cameras.py                ← Kamera kapcsolat és FPS diagnosztikai teszt
-│   ├── download_model.py              ← AI modell letöltő segédszkript
-│   └── setup_usbfs_memory.sh          ← Linux USBFS memóriabuffer növelő (2048 MB)
+│   └── download_model.py              ← AI modell letöltő segédszkript
 ├── data/                              ← Adattárolás (gitignored naplók és felvételek)
 │   ├── calibration/                   ← Sztereó kalibrációs mátrixok (`stereo_calibration.npz`)
 │   ├── recordings/                    ← Rögzített tesztvideók és képek
@@ -215,8 +215,8 @@ DEIK-ROBOTGOALKEEPER-PROJECT-2026/
 ```bash
 git clone https://github.com/MorvaiRoland/DEIK-ROBOTGOALKEEPER-PROJECT-2026.git
 cd DEIK-ROBOTGOALKEEPER-PROJECT-2026
-chmod +x setup.sh run.sh scripts/setup_usbfs_memory.sh
-./setup.sh
+chmod +x run.sh scripts/*.sh
+./scripts/setup.sh
 ```
 
 ### 2. Linux USBFS memóriabuffer növelése (Ximea dual-camera használatához kötelező!)
@@ -449,8 +449,8 @@ git clone https://github.com/MorvaiRoland/DEIK-ROBOTGOALKEEPER-PROJECT-2026.git
 cd DEIK-ROBOTGOALKEEPER-PROJECT-2026
 
 # 2. Automated environment setup
-chmod +x setup.sh run.sh scripts/setup_usbfs_memory.sh
-./setup.sh
+chmod +x run.sh scripts/*.sh
+./scripts/setup.sh
 
 # 3. Increase USBFS kernel memory buffer (Required for Ximea dual cameras)
 sudo ./scripts/setup_usbfs_memory.sh

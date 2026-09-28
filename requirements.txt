@@ -4,7 +4,7 @@
 # Telepítés: pip install -r requirements.txt
 #
 # Megjegyzések:
-#   - PyTorch CUDA verzióját külön kell telepíteni (lásd setup.sh)
+#   - PyTorch CUDA verzióját külön kell telepíteni (lásd scripts/setup.sh)
 #   - A Ximea xiAPI-t a gyártói SDK tartalmazza (nem pip-alapú)
 #   - TensorRT-t a CUDA SDK mellé kell telepíteni az NVIDIA oldaláról
 # =============================================================================

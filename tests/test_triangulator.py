@@ -133,6 +133,64 @@ class TestWorldCalibration:
         forward = np.array([tri._rect_to_world(p) for p in back])
         assert np.allclose(forward, pts_world, atol=1e-6)
 
+    def test_coplanar_ground_calibration_enforces_physical_orientation(self) -> None:
+        """Talajsíki (Y=0) kalibráció esetén a fizikai kényszer (t_y > 0, R_11 < 0) érvényesül."""
+        tri = _make_triangulator()
+        # Valós sztereó kalibrációból származó rektifikált kamera és kapu pontok
+        cam = np.array([
+            [1075.81965207, -291.71048219, 5473.04882383],
+            [-176.76397137,   56.18203279, 4811.91850437],
+            [1902.97258144,  749.95711709, 3793.43728912],
+        ])
+        world = np.array([
+            [200.0, 0.0, 3460.0],
+            [-1000.0, 0.0, 2850.0],
+            [970.0, 0.0, 1570.0],
+        ])
+        result = tri.calibrate_world_transform(cam, world)
+        assert result["rms_mm"] < 100.0  # Valós kalibráció enyhe mérési hibával
+        assert tri._R_wc is not None and tri._t_wc is not None
+
+        # Fizikai kényszerek:
+        # 1. A kamera a talaj felett van: t_y > 0 (~2500 mm)
+        assert tri._t_wc[1] > 2000.0
+        # 2. A kamera képén lefelé mozgás a valóságban lefelé irányul (R[1, 1] < 0)
+        assert tri._R_wc[1, 1] < 0.0
+        # 3. Determináns -1 (különböző kezesség: OpenCV Y-le vs Kapu Y-fel)
+        assert np.linalg.det(tri._R_wc) < 0.0
+
+        # 4. Levegőben lévő pontra a rekonstruált magasság pozitív
+        # Egy pont, amely a kamera képén felfelé mozdul el (Y_cam csökken)
+        p_cam_air = cam[0].copy()
+        p_cam_air[1] -= 200.0  # felfelé mozdult a kamera látómezejében
+        p_world_air = tri._rect_to_world(p_cam_air)
+        assert p_world_air[1] > 100.0  # Pozitív magasság a világban!
+
+
+class TestLeftPixelBackProjection:
+    """A mono-mélység tartalék a kalibrált K1/D1-et használja, nem a config/P1 értékeit."""
+
+    def test_uses_calibrated_k1_and_distortion(self) -> None:
+        tri = _make_triangulator()
+        tri._K1 = np.array([[1420.0, 0.0, 1020.0], [0.0, 1420.0, 614.0], [0.0, 0.0, 1.0]])
+        tri._D1 = np.zeros(5)
+        assert tri.left_focal_length_px == pytest.approx(1420.0)
+        x_n, y_n = tri.left_pixel_to_normalized(1020.0, 614.0)
+        assert x_n == pytest.approx(0.0, abs=1e-9) and y_n == pytest.approx(0.0, abs=1e-9)
+        x_n, _ = tri.left_pixel_to_normalized(1020.0 + 142.0, 614.0)
+        assert x_n == pytest.approx(0.1, abs=1e-9)
+
+        tri._D1 = np.array([-0.2, 0.05, 0.0, 0.0, 0.0])
+        x_d, _ = tri.left_pixel_to_normalized(1020.0 + 500.0, 614.0)
+        assert x_d > 500.0 / 1420.0  # hordótorzítás korrekciója kifelé tolja a sugarat
+
+    def test_uncalibrated_falls_back_to_config_intrinsics(self) -> None:
+        tri = _make_triangulator()
+        assert tri.left_focal_length_px == pytest.approx(1365.2)
+        x_n, y_n = tri.left_pixel_to_normalized(844.0, 608.0)
+        assert x_n == pytest.approx(0.0, abs=1e-9) and y_n == pytest.approx(0.0, abs=1e-9)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+

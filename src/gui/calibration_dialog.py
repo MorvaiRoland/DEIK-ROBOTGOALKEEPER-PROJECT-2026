@@ -18,10 +18,11 @@ ChArUco mód: cv2.aruco.CharucoBoard / cv2.aruco.CharucoDetector (OpenCV 5.x új
 """
 
 import logging
+import shutil
 import time
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # pyrefly: ignore [missing-import]
 import cv2
@@ -60,6 +61,37 @@ logger = logging.getLogger(__name__)
 class BoardType(Enum):
     CHESSBOARD = "chessboard"
     CHARUCO    = "charuco"
+
+
+# Szabad k3 mellett a 8 mm-es lencsénél a torzítás túlillesztődik (k3≈-1); a szabad képközéppont
+# pedig ~100 px-re elvándorolt – ez a kamera-forgatással (R) felcserélhető, ezért a képközépen rögzítjük.
+_MONO_CALIB_FLAGS = (
+    cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_ASPECT_RATIO | cv2.CALIB_FIX_K3
+    | cv2.CALIB_FIX_PRINCIPAL_POINT
+)
+
+# Döntés nélküli (szembőli) táblapózokból a fókusztávolság és a távolság nem választható szét.
+TILT_MIN_DEG = 25.0
+MIN_TILTED_VIEWS = 8
+MAX_FOCAL_DEVIATION = 0.05
+# R/T-hez (rögzített belső paraméterek mellett) kevesebb közös képpár is elég.
+MIN_STEREO_PAIRS = 10
+MIN_CHARUCO_CORNERS = 6
+
+
+def _nominal_camera_matrix(geo_cfg: dict, image_size: Tuple[int, int]) -> np.ndarray:
+    f_px = float(geo_cfg.get("focal_length_px", 1365.2))
+    w, h = image_size
+    return np.array(
+        [[f_px, 0.0, (w - 1) / 2.0], [0.0, f_px, (h - 1) / 2.0], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+
+
+def _board_span_ok(obj_pts: np.ndarray, square_mm: float) -> bool:
+    """Min. 3 sor és 3 oszlop sarok kell: egyetlen sornál a calibrateCamera kezdőbecslése szétszáll."""
+    span = np.ptp(np.asarray(obj_pts, dtype=np.float64).reshape(-1, 3)[:, :2], axis=0)
+    return bool(span.min() >= 2.0 * square_mm - 1e-3)
 
 
 # --------------------------------------------------------------------------- #
@@ -231,11 +263,15 @@ class CalibrationCaptureWorker(QThread):
         self.collected_pts_left:  List[np.ndarray] = []
         self.collected_pts_right: List[np.ndarray] = []
 
-        # Gyujtott adatok - ChArUco mod
+        # Gyujtott adatok - ChArUco mod: szinkron képpárok (csak a sztereó R/T-hez)
         self.collected_charuco_corners_left:  List[np.ndarray] = []
         self.collected_charuco_corners_right: List[np.ndarray] = []
         self.collected_charuco_ids_left:      List[np.ndarray] = []
         self.collected_charuco_ids_right:     List[np.ndarray] = []
+        # Kameránkénti képek a belső paraméterekhez: elég, ha csak az adott kamera látja a táblát.
+        self.mono_charuco: Dict[str, Dict[str, list]] = {
+            side: {"corners": [], "ids": [], "tilts": []} for side in ("left", "right")
+        }
 
         self.image_size: Optional[Tuple[int, int]] = None
 
@@ -337,6 +373,31 @@ class CalibrationCaptureWorker(QThread):
         self.collected_charuco_corners_right.clear()
         self.collected_charuco_ids_left.clear()
         self.collected_charuco_ids_right.clear()
+        for store in self.mono_charuco.values():
+            for lst in store.values():
+                lst.clear()
+
+    def mono_count(self, side: str) -> int:
+        return len(self.mono_charuco[side]["corners"])
+
+    def tilted_count(self, side: str) -> int:
+        return sum(1 for t in self.mono_charuco[side]["tilts"] if t >= TILT_MIN_DEG)
+
+    def _board_tilt_deg(self, corners: np.ndarray, ids: np.ndarray) -> Optional[float]:
+        """A tábla síkjának döntése az optikai tengelyhez képest (névleges K-val, közelítő)."""
+        if self.image_size is None:
+            return None
+        obj, img = self._charuco_board.matchImagePoints(corners, ids)
+        if obj is None or len(obj) < 6:
+            return None
+        K = _nominal_camera_matrix(self._config.get("geometry", {}), self.image_size)
+        ok, rvec, _ = cv2.solvePnP(
+            obj.reshape(-1, 1, 3).astype(np.float32), img.reshape(-1, 1, 2).astype(np.float32), K, None
+        )
+        if not ok:
+            return None
+        R, _ = cv2.Rodrigues(rvec)
+        return float(np.degrees(np.arccos(min(1.0, abs(R[2, 2])))))
 
     def collected_count(self) -> int:
         if self._board_type == BoardType.CHARUCO:
@@ -345,6 +406,25 @@ class CalibrationCaptureWorker(QThread):
 
     def stop(self):
         self._running = False
+
+    def _detect_charuco(
+        self,
+        frame_full: np.ndarray,
+        frame_small: np.ndarray,
+        scale: float,
+        force_full: bool,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """ChArUco sarkok teljes felbontású koordinátákban.
+
+        Előnézethez a gyors, kicsinyített keresés elég; ha ott nem látszik (távoli, kicsi
+        tábla → a markerbitek ~1 px-esek), illetve mentéskor mindig teljes felbontáson keresünk.
+        """
+        if not force_full:
+            cc, ci = find_charuco_corners(frame_small, self._charuco_board, self._charuco_detector)
+            if cc is not None:
+                # float32 kell: a float64 tömböt a drawDetectedCornersCharuco 2N eleműnek látja.
+                return np.ascontiguousarray(cc / scale, dtype=np.float32), ci
+        return find_charuco_corners(frame_full, self._charuco_board, self._charuco_detector)
 
     def run(self) -> None:
         self._running = True
@@ -400,6 +480,7 @@ class CalibrationCaptureWorker(QThread):
                 do_detect = (frame_counter % self.DETECT_EVERY_N_FRAMES == 0)
 
                 if do_detect:
+                    capture_now = self._capture_req
                     s    = self.PREVIEW_DOWNSCALE
                     h_s  = int(fl_raw.shape[0] * s)
                     w_s  = int(fl_raw.shape[1] * s)
@@ -407,20 +488,16 @@ class CalibrationCaptureWorker(QThread):
                     fr_s = cv2.resize(fr_raw, (w_s, h_s), interpolation=cv2.INTER_AREA)
 
                     if self._board_type == BoardType.CHARUCO:
-                        cc_l, ci_l = find_charuco_corners(fl_s, self._charuco_board, self._charuco_detector)
-                        cc_r, ci_r = find_charuco_corners(fr_s, self._charuco_board, self._charuco_detector)
-                        # FONTOS: explicit float32 cast!
-                        # cc_l / s Python float osztas float64-et ad vissza,
-                        # de drawDetectedCornersCharuco CV_32FC2-t var (total=N).
-                        # float64-kent az OpenCV 3D Mat-kent latja (total=2N) → assertion fail!
+                        cc_l, ci_l = self._detect_charuco(fl_raw, fl_s, s, capture_now)
+                        cc_r, ci_r = self._detect_charuco(fr_raw, fr_s, s, capture_now)
                         if cc_l is not None:
-                            last_charuco_cl = np.ascontiguousarray(cc_l / s, dtype=np.float32)
+                            last_charuco_cl = cc_l
                             last_charuco_il = np.ascontiguousarray(ci_l, dtype=np.int32).reshape(-1, 1)
                         else:
                             last_charuco_cl = None
                             last_charuco_il = None
                         if cc_r is not None:
-                            last_charuco_cr = np.ascontiguousarray(cc_r / s, dtype=np.float32)
+                            last_charuco_cr = cc_r
                             last_charuco_ir = np.ascontiguousarray(ci_r, dtype=np.int32).reshape(-1, 1)
                         else:
                             last_charuco_cr = None
@@ -491,30 +568,60 @@ class CalibrationCaptureWorker(QThread):
         obj_pattern: np.ndarray,
     ) -> None:
         if self._board_type == BoardType.CHARUCO:
-            both = cc_l is not None and cc_r is not None
-            if not both:
-                self.capture_result.emit(False, "Kepp ar nem mentheto: ChArUco tabla nem lathato mindket kameraban!")
-                return
-            too_l, diff_l = self._is_charuco_pose_too_similar(
-                cc_l, ci_l,
-                self.collected_charuco_corners_left,
-                self.collected_charuco_ids_left,
+            saved: List[str] = []
+            narrow: List[str] = []
+            board_pts = self._charuco_board.getChessboardCorners()
+            square = float(self._charuco_board.getSquareLength())
+            for side, label, cc, ci in (("left", "bal", cc_l, ci_l), ("right", "jobb", cc_r, ci_r)):
+                if cc is None or len(cc) < MIN_CHARUCO_CORNERS:
+                    continue
+                if not _board_span_ok(board_pts[ci.flatten()], square):
+                    narrow.append(label)
+                    continue
+                store = self.mono_charuco[side]
+                if self._is_charuco_pose_too_similar(cc, ci, store["corners"], store["ids"])[0]:
+                    continue
+                tilt = self._board_tilt_deg(cc, ci) or 0.0
+                store["corners"].append(cc)
+                store["ids"].append(ci)
+                store["tilts"].append(tilt)
+                saved.append(f"{label} ({tilt:.0f}°)")
+
+            common_ids = (
+                np.intersect1d(ci_l.flatten(), ci_r.flatten())
+                if cc_l is not None and cc_r is not None else np.array([], dtype=np.int32)
             )
-            too_r, diff_r = self._is_charuco_pose_too_similar(
-                cc_r, ci_r,
-                self.collected_charuco_corners_right,
-                self.collected_charuco_ids_right,
-            )
-            min_diff = min(diff_l, diff_r)
-            if too_l or too_r:
-                self.capture_result.emit(False, f"Tulontosan hasonlo poz! ({min_diff:.0f} px < {self.MIN_POSE_DIFF_PX:.0f} px) – mozd el a tablat!")
+            if len(common_ids) >= MIN_CHARUCO_CORNERS and _board_span_ok(board_pts[common_ids], square):
+                too_l, _ = self._is_charuco_pose_too_similar(
+                    cc_l, ci_l, self.collected_charuco_corners_left, self.collected_charuco_ids_left
+                )
+                too_r, _ = self._is_charuco_pose_too_similar(
+                    cc_r, ci_r, self.collected_charuco_corners_right, self.collected_charuco_ids_right
+                )
+                if not (too_l or too_r):
+                    self.collected_charuco_corners_left.append(cc_l)
+                    self.collected_charuco_corners_right.append(cc_r)
+                    self.collected_charuco_ids_left.append(ci_l)
+                    self.collected_charuco_ids_right.append(ci_r)
+                    saved.append("sztereó pár")
+
+            if not saved:
+                hint = (
+                    f" ({'/'.join(narrow)} kamerán csak 1–2 sor sarok látszik – vidd beljebb a táblát!)"
+                    if narrow else ""
+                )
+                self.capture_result.emit(
+                    False,
+                    "Nem mentve: a tábla egyik kamerában sem látszik elég jól, vagy túl hasonló "
+                    f"a korábbi képekhez – mozdítsd/döntsd el a táblát!{hint}"
+                )
                 return
-            self.collected_charuco_corners_left.append(cc_l)
-            self.collected_charuco_corners_right.append(cc_r)
-            self.collected_charuco_ids_left.append(ci_l)
-            self.collected_charuco_ids_right.append(ci_r)
-            n = len(self.collected_charuco_corners_left)
-            self.capture_result.emit(True, f"ChArUco keppar mentve: {n} db | bal sarkok: {len(cc_l)}, jobb: {len(cc_r)} | elters: {min_diff:.0f} px")
+            self.capture_result.emit(
+                True,
+                f"Mentve: {', '.join(saved)} | bal: {self.mono_count('left')} "
+                f"(döntött {self.tilted_count('left')}), jobb: {self.mono_count('right')} "
+                f"(döntött {self.tilted_count('right')}), sztereó: {self.collected_count()}"
+            )
         else:
             both = corners_l is not None and corners_r is not None
             if not both:
@@ -558,6 +665,7 @@ class CalibrationRunWorker(QThread):
         charuco_cr:    Optional[List[np.ndarray]] = None,
         charuco_il:    Optional[List[np.ndarray]] = None,
         charuco_ir:    Optional[List[np.ndarray]] = None,
+        mono_charuco:  Optional[Dict[str, Dict[str, list]]] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -573,6 +681,12 @@ class CalibrationRunWorker(QThread):
         self._charuco_cr    = charuco_cr or []
         self._charuco_il    = charuco_il or []
         self._charuco_ir    = charuco_ir or []
+        # Kameránkénti képek hiányában (régi hívók) a sztereó párokból kalibrálunk.
+        mono = mono_charuco or {}
+        self._mono_cl = mono.get("left", {}).get("corners") or self._charuco_cl
+        self._mono_il = mono.get("left", {}).get("ids") or self._charuco_il
+        self._mono_cr = mono.get("right", {}).get("corners") or self._charuco_cr
+        self._mono_ir = mono.get("right", {}).get("ids") or self._charuco_ir
 
     def _log(self, msg: str):
         logger.info(msg)
@@ -606,21 +720,18 @@ class CalibrationRunWorker(QThread):
         n = len(self._obj_pts)
         self._log(f"[Chessboard] Sztereó kalibrálás: {n} képpár, képméret: {self._image_size}")
 
-        f_px = float(self._geo_cfg.get("focal_length_px", 1365.2))
-        cx   = float(self._geo_cfg.get("principal_point_x", 968.0))
-        cy_  = float(self._geo_cfg.get("principal_point_y", 608.0))
         ref_baseline = float(self._geo_cfg.get("baseline_mm", 2200.0))
         max_rmse     = float(self._stereo_cfg.get("max_acceptable_rmse_px", 1.0))
         square_mm    = float(self._stereo_cfg.get("chessboard", {}).get("square_size_mm", 65.0))
 
-        self._log(f"  Négyzetméret: {square_mm:.1f} mm | Kezdő f_px: {f_px:.1f}")
-        K_init = np.array([[f_px, 0.0, cx], [0.0, f_px, cy_], [0.0, 0.0, 1.0]], dtype=np.float64)
+        K_init = _nominal_camera_matrix(self._geo_cfg, self._image_size)
+        self._log(f"  Négyzetméret: {square_mm:.1f} mm | Kezdő f_px: {K_init[0, 0]:.1f}")
 
         self._log("[1/3] Bal kamera kalibrálás...")
         rmse_l, K1, D1, rvecs_l, tvecs_l = cv2.calibrateCamera(
             self._obj_pts, self._pts_l, self._image_size,
             K_init.copy(), None,
-            flags=cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_ASPECT_RATIO
+            flags=_MONO_CALIB_FLAGS
         )
         self._log(f"  Bal RMSE: {rmse_l:.4f} px")
 
@@ -628,7 +739,7 @@ class CalibrationRunWorker(QThread):
         rmse_r, K2, D2, rvecs_r, tvecs_r = cv2.calibrateCamera(
             self._obj_pts, self._pts_r, self._image_size,
             K_init.copy(), None,
-            flags=cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_ASPECT_RATIO
+            flags=_MONO_CALIB_FLAGS
         )
         self._log(f"  Jobb RMSE: {rmse_r:.4f} px")
 
@@ -641,9 +752,9 @@ class CalibrationRunWorker(QThread):
         if n_rm > 0:
             self._log(f"  {n_rm} keppar kizarva, maradt: {len(obj_c)} db – ujrakalibralás...")
             rmse_l, K1, D1, _, _ = cv2.calibrateCamera(obj_c, pts_l_c, self._image_size, K1.copy(), D1.copy(),
-                                                         flags=cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_ASPECT_RATIO)
+                                                         flags=_MONO_CALIB_FLAGS)
             rmse_r, K2, D2, _, _ = cv2.calibrateCamera(obj_c, pts_r_c, self._image_size, K2.copy(), D2.copy(),
-                                                         flags=cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_ASPECT_RATIO)
+                                                         flags=_MONO_CALIB_FLAGS)
             self._log(f"  Ujrakalibr. RMSE – Bal: {rmse_l:.4f} px | Jobb: {rmse_r:.4f} px")
         else:
             self._log("  Nem talaltunk outlier kepparokat.")
@@ -658,90 +769,126 @@ class CalibrationRunWorker(QThread):
         self._emit_result(rmse_s, float(rmse_l), float(rmse_r), K1, D1, K2, D2, R, T, E, F,
                           ref_baseline, max_rmse)
 
+    def _charuco_to_obj_img(
+        self, corners: List[np.ndarray], ids: List[np.ndarray], label: str
+    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        obj_pts, img_pts = [], []
+        for i, (cc, ci) in enumerate(zip(corners, ids)):
+            try:
+                obj, img = self._charuco_board.matchImagePoints(cc, ci)
+            except Exception as e:
+                self._log(f"  [skip-{label}] kép #{i+1}: matchImagePoints hiba: {e}")
+                continue
+            # A calibrateCamera DLT pózbecslése képenként legalább 6 pontot igényel.
+            if obj is None or len(obj) < MIN_CHARUCO_CORNERS:
+                self._log(f"  [skip-{label}] kép #{i+1}: túl kevés sarokpont ({0 if obj is None else len(obj)})")
+                continue
+            if not _board_span_ok(obj, float(self._charuco_board.getSquareLength())):
+                self._log(f"  [skip-{label}] kép #{i+1}: a sarkok egy-két sorban vannak (degenerált)")
+                continue
+            obj_pts.append(np.ascontiguousarray(obj.reshape(-1, 1, 3), dtype=np.float32))
+            img_pts.append(np.ascontiguousarray(img.reshape(-1, 1, 2), dtype=np.float32))
+        return obj_pts, img_pts
+
+    def _calibrate_mono_robust(
+        self, obj_pts: List[np.ndarray], img_pts: List[np.ndarray], K_init: np.ndarray, label: str
+    ) -> Tuple[float, np.ndarray, np.ndarray]:
+        """Egykamerás kalibrálás kiugró (elmosódott / rosszul detektált) képek kiszűrésével."""
+        rms, K, D, rvecs, tvecs = cv2.calibrateCamera(
+            obj_pts, img_pts, self._image_size, K_init.copy(), None, flags=_MONO_CALIB_FLAGS
+        )
+        errs = self._per_image_reproj_errors(obj_pts, img_pts, K, D, rvecs, tvecs)
+        thresh = max(2.0 * float(np.median(errs)), 0.5)
+        keep = [i for i, e in enumerate(errs) if e <= thresh]
+        self._log(
+            f"  {label}: képenkénti hiba medián {np.median(errs):.2f} px, max {max(errs):.2f} px "
+            f"(első futás RMSE {rms:.3f} px, f={K[0, 0]:.1f})"
+        )
+        if len(keep) < len(errs) and len(keep) >= 5:
+            for i, e in enumerate(errs):
+                if e > thresh:
+                    self._log(f"  [outlier-{label}] kép #{i+1}: {e:.2f} px > {thresh:.2f} px → kizárva")
+            obj_pts = [obj_pts[i] for i in keep]
+            img_pts = [img_pts[i] for i in keep]
+            rms, K, D, _, _ = cv2.calibrateCamera(
+                obj_pts, img_pts, self._image_size, K_init.copy(), None, flags=_MONO_CALIB_FLAGS
+            )
+        # Csak diagnosztika: ha szabad képközépponttal lényegesen kisebb a hiba, a lencse középpontja elcsúszott.
+        rms_free, K_free, _, _, _ = cv2.calibrateCamera(
+            obj_pts, img_pts, self._image_size, K.copy(), D.copy(),
+            flags=_MONO_CALIB_FLAGS & ~cv2.CALIB_FIX_PRINCIPAL_POINT,
+        )
+        self._log(
+            f"  {label} RMSE: {rms:.4f} px | {len(obj_pts)} kép | f={K[0, 0]:.1f} px | "
+            f"D={np.round(D.ravel()[:4], 4).tolist()}"
+        )
+        self._log(
+            f"    (szabad képközépponttal: RMSE {rms_free:.4f} px, f={K_free[0, 0]:.1f}, "
+            f"cx={K_free[0, 2]:.0f}, cy={K_free[1, 2]:.0f})"
+        )
+        return float(rms), K, D
+
+    def _filter_stereo_pairs(self, obj_pts, pts_l, pts_r, K1, D1, K2, D2):
+        """Kizárja azokat a képpárokat, amelyek a rögzített belső paraméterekkel sem illeszkednek."""
+        errs = []
+        for o, pl, pr in zip(obj_pts, pts_l, pts_r):
+            pair_err = []
+            for p, K, D in ((pl, K1, D1), (pr, K2, D2)):
+                _, rv, tv = cv2.solvePnP(o, p, K, D)
+                proj, _ = cv2.projectPoints(o, rv, tv, K, D)
+                pair_err.append(float(np.mean(np.linalg.norm(p.reshape(-1, 2) - proj.reshape(-1, 2), axis=1))))
+            errs.append(max(pair_err))
+        thresh = max(2.0 * float(np.median(errs)), 0.5)
+        keep = [i for i, e in enumerate(errs) if e <= thresh]
+        if len(keep) == len(errs) or len(keep) < 5:
+            return obj_pts, pts_l, pts_r
+        for i, e in enumerate(errs):
+            if e > thresh:
+                self._log(f"  [outlier-sztereó] képpár #{i+1}: {e:.2f} px > {thresh:.2f} px → kizárva")
+        return [obj_pts[i] for i in keep], [pts_l[i] for i in keep], [pts_r[i] for i in keep]
+
     def _run_charuco_calibration(self) -> None:
-        n = len(self._charuco_cl)
-        self._log(f"[ChArUco] Sztereó kalibrálás: {n} képpár, képméret: {self._image_size}")
+        self._log(
+            f"[ChArUco] Kalibrálás: bal {len(self._mono_cl)} kép, jobb {len(self._mono_cr)} kép, "
+            f"{len(self._charuco_cl)} sztereó képpár, képméret: {self._image_size}"
+        )
         self._log("  API: OpenCV 5.0.0 – board.matchImagePoints() + cv2.calibrateCamera()")
 
-        f_px = float(self._geo_cfg.get("focal_length_px", 1365.2))
-        cx   = float(self._geo_cfg.get("principal_point_x", 968.0))
-        cy_  = float(self._geo_cfg.get("principal_point_y", 608.0))
         ref_baseline = float(self._geo_cfg.get("baseline_mm", 2200.0))
         max_rmse     = float(self._stereo_cfg.get("max_acceptable_rmse_px", 1.0))
 
-        K_init = np.array([[f_px, 0.0, cx], [0.0, f_px, cy_], [0.0, 0.0, 1.0]], dtype=np.float64)
+        K_init = _nominal_camera_matrix(self._geo_cfg, self._image_size)
 
-        # ─── matchImagePoints: ChArUco corners → (obj_pts, img_pts) párok ─────
-        # OpenCV 5.0.0: calibrateCameraCharuco el lett távolítva.
-        # board.matchImagePoints(charuco_corners, charuco_ids) adja vissza a
-        # 3D objektumpontokat és 2D képpontokat, amelyek cv2.calibrateCamera()-ba mennek.
         self._log("[0/3] ChArUco sarokpontok konvertálása obj/img pontpárokra (matchImagePoints)...")
+        obj_pts_l, img_pts_l = self._charuco_to_obj_img(self._mono_cl, self._mono_il, "L")
+        obj_pts_r, img_pts_r = self._charuco_to_obj_img(self._mono_cr, self._mono_ir, "R")
 
-        obj_pts_l, img_pts_l = [], []
-        obj_pts_r, img_pts_r = [], []
-        obj_pts_stereo       = []
-        pts_l_stereo         = []
-        pts_r_stereo         = []
-
-        for i, (cl, cr, il, ir) in enumerate(zip(
-            self._charuco_cl, self._charuco_cr,
-            self._charuco_il, self._charuco_ir
-        )):
-            # Bal kamera
-            try:
-                obj_l, img_l = self._charuco_board.matchImagePoints(cl, il)
-            except Exception as e:
-                self._log(f"  [skip-L] képpár #{i+1}: matchImagePoints hiba: {e}")
-                continue
-
-            # Jobb kamera
-            try:
-                obj_r, img_r = self._charuco_board.matchImagePoints(cr, ir)
-            except Exception as e:
-                self._log(f"  [skip-R] képpár #{i+1}: matchImagePoints hiba: {e}")
-                continue
-
-            if obj_l is None or obj_r is None or len(obj_l) < 4 or len(obj_r) < 4:
-                self._log(f"  [skip] képpár #{i+1}: túl kevés sarokpont (bal:{len(obj_l) if obj_l is not None else 0}, jobb:{len(obj_r) if obj_r is not None else 0})")
-                continue
-
-            # (N, 3) float32 → (N, 1, 3) az OpenCV calibrateCamera-hoz
-            obj_l_3d = np.ascontiguousarray(obj_l.reshape(-1, 1, 3), dtype=np.float32)
-            img_l_2d = np.ascontiguousarray(img_l.reshape(-1, 1, 2), dtype=np.float32)
-            obj_r_3d = np.ascontiguousarray(obj_r.reshape(-1, 1, 3), dtype=np.float32)
-            img_r_2d = np.ascontiguousarray(img_r.reshape(-1, 1, 2), dtype=np.float32)
-
-            obj_pts_l.append(obj_l_3d)
-            img_pts_l.append(img_l_2d)
-            obj_pts_r.append(obj_r_3d)
-            img_pts_r.append(img_r_2d)
-
-            # Sztereó kalibráláshoz: közös obj_pts (bal == jobb ha mindkettő lefedett)
-            # Csak a közös (metszet) sarokpontokat vesszük
+        obj_pts_stereo = []
+        pts_l_stereo   = []
+        pts_r_stereo   = []
+        board_obj_pts  = self._charuco_board.getChessboardCorners()
+        for cl, cr, il, ir in zip(self._charuco_cl, self._charuco_cr, self._charuco_il, self._charuco_ir):
             ids_l = il.flatten()
             ids_r = ir.flatten()
             common_ids = np.intersect1d(ids_l, ids_r)
-            if len(common_ids) >= 4:
-                idx_l = np.array([np.where(ids_l == cid)[0][0] for cid in common_ids])
-                idx_r = np.array([np.where(ids_r == cid)[0][0] for cid in common_ids])
-
-                # Közös obj_pts a board-ból (ID alapján)
-                board_obj_pts = self._charuco_board.getChessboardCorners()
-                common_obj = board_obj_pts[common_ids].reshape(-1, 1, 3).astype(np.float32)
-                common_l   = cl[idx_l].reshape(-1, 1, 2).astype(np.float32)
-                common_r   = cr[idx_r].reshape(-1, 1, 2).astype(np.float32)
-                obj_pts_stereo.append(common_obj)
-                pts_l_stereo.append(common_l)
-                pts_r_stereo.append(common_r)
+            if len(common_ids) < MIN_CHARUCO_CORNERS or not _board_span_ok(
+                board_obj_pts[common_ids], float(self._charuco_board.getSquareLength())
+            ):
+                continue
+            idx_l = np.array([np.where(ids_l == cid)[0][0] for cid in common_ids])
+            idx_r = np.array([np.where(ids_r == cid)[0][0] for cid in common_ids])
+            obj_pts_stereo.append(board_obj_pts[common_ids].reshape(-1, 1, 3).astype(np.float32))
+            pts_l_stereo.append(cl[idx_l].reshape(-1, 1, 2).astype(np.float32))
+            pts_r_stereo.append(cr[idx_r].reshape(-1, 1, 2).astype(np.float32))
 
         n_l = len(obj_pts_l)
         n_r = len(obj_pts_r)
         n_s = len(obj_pts_stereo)
-        self._log(f"  Érvényes: bal={n_l}, jobb={n_r}, sztereó={n_s} képpár")
+        self._log(f"  Érvényes: bal={n_l} kép, jobb={n_r} kép, sztereó={n_s} képpár")
 
         if n_l < 5 or n_r < 5:
             raise RuntimeError(
-                f"Túl kevés érvényes képpár (bal:{n_l}, jobb:{n_r}). Min. 5 szükséges!"
+                f"Túl kevés érvényes kép (bal:{n_l}, jobb:{n_r}). Min. 5 szükséges kameránként!"
             )
         if n_s < 5:
             raise RuntimeError(
@@ -750,23 +897,17 @@ class CalibrationRunWorker(QThread):
 
         # ─── [1/3] Bal kamera kalibrálás ─────────────────────────────────────
         self._log("[1/3] Bal kamera kalibrálás (cv2.calibrateCamera)...")
-        rmse_l, K1, D1, rvecs_l, tvecs_l = cv2.calibrateCamera(
-            obj_pts_l, img_pts_l, self._image_size,
-            K_init.copy(), None,
-            flags=cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_ASPECT_RATIO,
-        )
-        self._log(f"  Bal RMSE: {rmse_l:.4f} px")
+        rmse_l, K1, D1 = self._calibrate_mono_robust(obj_pts_l, img_pts_l, K_init, "Bal")
 
         # ─── [2/3] Jobb kamera kalibrálás ────────────────────────────────────
         self._log("[2/3] Jobb kamera kalibrálás (cv2.calibrateCamera)...")
-        rmse_r, K2, D2, rvecs_r, tvecs_r = cv2.calibrateCamera(
-            obj_pts_r, img_pts_r, self._image_size,
-            K_init.copy(), None,
-            flags=cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_FIX_ASPECT_RATIO,
-        )
-        self._log(f"  Jobb RMSE: {rmse_r:.4f} px")
+        rmse_r, K2, D2 = self._calibrate_mono_robust(obj_pts_r, img_pts_r, K_init, "Jobb")
 
         # ─── [3/3] Sztereó kalibrálás ─────────────────────────────────────────
+        obj_pts_stereo, pts_l_stereo, pts_r_stereo = self._filter_stereo_pairs(
+            obj_pts_stereo, pts_l_stereo, pts_r_stereo, K1, D1, K2, D2
+        )
+        n_s = len(obj_pts_stereo)
         self._log(f"[3/3] Sztereó kalibrálás (R, T) – {n_s} képpár...")
         rmse_s, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
             obj_pts_stereo, pts_l_stereo, pts_r_stereo,
@@ -790,6 +931,18 @@ class CalibrationRunWorker(QThread):
         baseline_diff = abs(baseline_mm - ref_baseline)
         self._log(f"  Mért baseline: {baseline_mm:.1f} mm (ref: {ref_baseline:.0f} mm, eltérés: {baseline_diff:.1f} mm)")
         quality = "KIVÁLÓ ✓" if rmse_s < 0.5 else ("JÓ ✓" if rmse_s < max_rmse else "GYENGE ⚠")
+        f_nom = float(self._geo_cfg.get("focal_length_px", 1365.2))
+        f_dev = max(abs(K1[0, 0] - f_nom), abs(K2[0, 0] - f_nom)) / f_nom
+        self._log(
+            f"  Fókusz: bal {K1[0, 0]:.1f} px, jobb {K2[0, 0]:.1f} px "
+            f"(névleges {f_nom:.1f} px, max. eltérés {f_dev * 100:.1f}%)"
+        )
+        if f_dev > MAX_FOCAL_DEVIATION:
+            quality = "GYENGE ⚠"
+            self._log(
+                f"  ⚠ A fókusztávolság {f_dev * 100:.0f}%-kal eltér a névlegestől → a mélység (Z) is "
+                f"kb. ennyivel hibás lesz! Több erősen döntött (30–45°) táblapóz kell."
+            )
         self._log(f"Minőség: {quality} | RMSE: {rmse_s:.4f} px | Baseline: {baseline_mm:.1f} mm")
         self.finished.emit({
             "K1": K1, "D1": D1, "K2": K2, "D2": D2, "R": R, "T": T, "E": E, "F": F,
@@ -1031,9 +1184,12 @@ class CalibrationDialog(QDialog):
         self._spin_min = QSpinBox()
         self._spin_min.setRange(5, 100)
         self._spin_min.setValue(int(stereo_cfg.get("min_calibration_frames", 20)))
-        self._spin_min.setToolTip("Min. 15-20 képpár ajánlott")
+        self._spin_min.setToolTip(
+            f"ChArUco: ennyi kép kell KAMERÁNKÉNT (a tábla elég, ha csak az egyiken látszik), "
+            f"plusz min. {MIN_STEREO_PAIRS} közös képpár a sztereóhoz"
+        )
         self._spin_min.setMinimumWidth(140)
-        cb_form.addRow(self._flbl("Min. képpárok:"), self._spin_min)
+        cb_form.addRow(self._flbl("Min. kép kameránként:"), self._spin_min)
         ly.addWidget(cb_grp)
 
         # --- Geometria (csak tájékoztató) ---
@@ -1261,7 +1417,7 @@ class CalibrationDialog(QDialog):
             if self._is_dark else
             "background: #FEF3C7; color: #92400E; font-weight: 700; border-radius: 6px; padding: 8px 14px; font-size: 13px;"
         )
-        self._lbl_count = QLabel("0 / 20  képpár")
+        self._lbl_count = QLabel("Bal: 0  |  Jobb: 0  |  Sztereó: 0")
         self._lbl_count.setStyleSheet(
             "font-weight: 900; font-size: 14px; color: #4ADE80; padding: 4px 12px; background: #064E3B; border: 1px solid #10B981; border-radius: 6px;"
             if self._is_dark else
@@ -1274,7 +1430,7 @@ class CalibrationDialog(QDialog):
         self._progress = QProgressBar()
         self._progress.setRange(0, 20)
         self._progress.setValue(0)
-        self._progress.setFormat("%v / %m képpár rögzítve")
+        self._progress.setFormat("%v / %m kép rögzítve")
         ly.addWidget(self._progress)
 
         l_cfg   = self._config.get("camera", {}).get("left", {})
@@ -1348,9 +1504,10 @@ class CalibrationDialog(QDialog):
         ly.addLayout(ctrl)
 
         tip = QLabel(
-            "💡  Tartsd a kalibrációs táblát különböző szögekben és távolságokban (0.5 – 3 m). "
-            "Min. 15–20 képpár szükséges. "
-            "ChArUco módban a részlegesen látható tábla is elfogadott!"
+            "💡  ChArUco: 1) KAMERÁNKÉNT min. 20 kép – elég, ha csak az egyik kamera látja a táblát: "
+            "vidd a kép széleire, sarkaiba, felső sávjába, 30–45°-ban döntve (1–4 m). "
+            f"2) Min. {MIN_STEREO_PAIRS} közös képpár, ahol MINDKÉT kamera látja (2–4 m, változó helyen). "
+            "SPACE mindig azt menti, amit épp lát: bal / jobb képet és – ha mindkettő látja – sztereó párt is."
         )
         tip.setWordWrap(True)
         tip.setStyleSheet("color: #94A3B8; font-size: 12px; padding: 4px; font-weight: 500;" if self._is_dark else "color: #475569; font-size: 12px; padding: 4px; font-weight: 500;")
@@ -1452,8 +1609,7 @@ class CalibrationDialog(QDialog):
         c["aruco_dict"]             = self._combo_aruco_dict.currentData()
         s["min_calibration_frames"] = self._spin_min.value()
         s["calibration_file"]       = self._edit_out.text()
-        self._progress.setMaximum(self._spin_min.value())
-        self._progress.setFormat(f"%v / {self._spin_min.value()} képpár rögzítve")
+        self._refresh_counts()
         self._update_board_type_ui()
         QMessageBox.information(self, "Beállítások alkalmazva",
                                 "A kalibrációs tábla paraméterek frissítve a munkamenetben.")
@@ -1527,12 +1683,12 @@ class CalibrationDialog(QDialog):
             self._update_alignment_ui(align_res)
 
         both  = cl is not None and cr is not None
-        n     = self._capture_worker.collected_count() if self._capture_worker else 0
-        min_f = self._spin_min.value()
+        n_l, n_r, n_s = self._capture_counts()
+        charuco = self._get_current_board_type() == BoardType.CHARUCO
 
-        status_color = (0, 200, 60) if both else (30, 120, 255)
-        board_label  = "ChArUco" if self._get_current_board_type() == BoardType.CHARUCO else "Sakktabla"
-        txt = f"Kepparok: {n}/{min_f}  |  " + (
+        status_color = (0, 200, 60) if both else ((0, 200, 200) if charuco and (cl is not None or cr is not None) else (30, 120, 255))
+        board_label  = "ChArUco" if charuco else "Sakktabla"
+        txt = f"B:{n_l} J:{n_r} Sz:{n_s}  |  " + (
             f"{board_label} MINDKET KAMERABAN! -> SPACE" if both else f"{board_label} keresese..."
         )
         cv2.putText(fl, txt, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.60, status_color, 2)
@@ -1555,17 +1711,19 @@ class CalibrationDialog(QDialog):
                        Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self._cam_lbl.setPixmap(pixmap)
 
-        self._lbl_count.setText(f"{n} / {min_f}  képpár")
-        self._progress.setMaximum(min_f)
-        self._progress.setValue(min(n, min_f))
-
         if both:
-            self._set_status("✅  Tábla MINDKÉT kamerában látható!  →  SPACE = képpár mentése", "#DCFCE7", "#14532D")
+            self._set_status("✅  Tábla MINDKÉT kamerában látható!  →  SPACE = bal + jobb kép + sztereó pár", "#DCFCE7", "#14532D")
+        elif charuco and (cl is not None or cr is not None):
+            side = "BAL" if cl is not None else "JOBB"
+            self._set_status(
+                f"📷  Tábla csak a {side} kamerában  →  SPACE = csak {side.lower()} kép mentése (belső kalibrációhoz)",
+                "#E0F2FE", "#075985",
+            )
         else:
             nf = int(cl is not None) + int(cr is not None)
             self._set_status(f"🔍  Tábla keresése... ({nf}/2 kamera talált)", "#FEF3C7", "#92400E")
 
-        self._update_run_btn(n)
+        self._refresh_counts()
 
     def _set_status(self, txt: str, bg: str, fg: str) -> None:
         self._lbl_status.setText(txt)
@@ -1577,12 +1735,8 @@ class CalibrationDialog(QDialog):
     @pyqtSlot(bool, str)
     def _on_capture_result(self, success: bool, msg: str) -> None:
         if success:
-            n     = self._capture_worker.collected_count() if self._capture_worker else 0
-            min_f = self._spin_min.value()
-            self._lbl_count.setText(f"{n} / {min_f}  képpár")
-            self._progress.setValue(min(n, min_f))
+            self._refresh_counts()
             self._set_status(f"✅  {msg}", "#DCFCE7", "#14532D")
-            self._update_run_btn(n)
         else:
             self._set_status(f"⚠  {msg}", "#FEF3C7", "#92400E")
 
@@ -1600,9 +1754,7 @@ class CalibrationDialog(QDialog):
         )
         if reply == QMessageBox.StandardButton.Yes and self._capture_worker:
             self._capture_worker.clear_collected()
-            self._lbl_count.setText(f"0 / {self._spin_min.value()}  képpár")
-            self._progress.setValue(0)
-            self._update_run_btn(0)
+            self._refresh_counts()
 
     @pyqtSlot(str)
     def _on_cam_error(self, msg: str) -> None:
@@ -1620,36 +1772,90 @@ class CalibrationDialog(QDialog):
         self._btn_cap.setEnabled(False)
         self._set_status("⏸  Kamera leállítva.", "#F1F5F9", "#475569")
 
-    def _update_run_btn(self, n: int) -> None:
-        min_f = self._spin_min.value()
-        ok    = n >= min_f
+    def _capture_counts(self) -> Tuple[int, int, int]:
+        """(bal képek, jobb képek, sztereó párok); sakktábla módban mindhárom a képpárok száma."""
+        w = self._capture_worker
+        if w is None:
+            return 0, 0, 0
+        if w._board_type == BoardType.CHARUCO:
+            return w.mono_count("left"), w.mono_count("right"), w.collected_count()
+        n = w.collected_count()
+        return n, n, n
+
+    def _min_stereo_pairs(self) -> int:
+        if self._get_current_board_type() == BoardType.CHARUCO:
+            return MIN_STEREO_PAIRS
+        return self._spin_min.value()
+
+    def _refresh_counts(self) -> None:
+        n_l, n_r, n_s = self._capture_counts()
+        min_m = self._spin_min.value()
+        min_s = self._min_stereo_pairs()
+        self._lbl_count.setText(f"Bal: {n_l}/{min_m}  |  Jobb: {n_r}/{min_m}  |  Sztereó: {n_s}/{min_s}")
+        self._progress.setMaximum(2 * min_m + min_s)
+        self._progress.setValue(min(n_l, min_m) + min(n_r, min_m) + min(n_s, min_s))
+        ok = n_l >= min_m and n_r >= min_m and n_s >= min_s
         self._btn_run.setEnabled(ok)
         if ok:
-            self._btn_run.setText(f"🔬  KALIBRÁLÁS INDÍTÁSA  ({n} képpár)")
+            self._btn_run.setText(f"🔬  KALIBRÁLÁS INDÍTÁSA  (bal {n_l}, jobb {n_r}, sztereó {n_s})")
         else:
-            self._btn_run.setText(f"🔬  Kalibrálás  (még {max(0, min_f - n)} képpár kell)")
+            self._btn_run.setText(
+                f"🔬  Kalibrálás  (még kell: bal {max(0, min_m - n_l)}, "
+                f"jobb {max(0, min_m - n_r)}, sztereó {max(0, min_s - n_s)})"
+            )
 
     @pyqtSlot()
     def _on_run(self) -> None:
-        if not self._capture_worker or self._capture_worker.collected_count() == 0:
+        if not self._capture_worker:
             QMessageBox.warning(self, "Hiba", "Nincs rögzített kamera adat!")
             return
 
-        n     = self._capture_worker.collected_count()
-        min_f = self._spin_min.value()
-        if n < min_f:
-            QMessageBox.warning(self, "Nincs elég képpár", f"Minimum {min_f} szükséges, jelenleg {n} van!")
+        n_l, n_r, n_s = self._capture_counts()
+        min_m = self._spin_min.value()
+        min_s = self._min_stereo_pairs()
+        if n_l < min_m or n_r < min_m or n_s < min_s:
+            QMessageBox.warning(
+                self, "Nincs elég kép",
+                f"Szükséges: kameránként {min_m} kép és {min_s} sztereó képpár.\n"
+                f"Jelenleg: bal {n_l}, jobb {n_r}, sztereó {n_s}."
+            )
             return
         if self._capture_worker.image_size is None:
             QMessageBox.warning(self, "Hiba", "Kép méret ismeretlen!")
             return
+        if self._capture_worker._board_type == BoardType.CHARUCO:
+            t_l = self._capture_worker.tilted_count("left")
+            t_r = self._capture_worker.tilted_count("right")
+            if min(t_l, t_r) < MIN_TILTED_VIEWS:
+                reply = QMessageBox.question(
+                    self, "Kevés döntött táblapóz",
+                    f"Legalább {TILT_MIN_DEG:.0f}°-ban döntött tábla: bal kamerán {t_l}, "
+                    f"jobb kamerán {t_r} képen (ajánlott: kameránként min. {MIN_TILTED_VIEWS}).\n\n"
+                    f"Szembőli táblából a fókusztávolság és ezzel a mélység ~10%-kal is "
+                    f"elcsúszhat. Inkább rögzíts még 30–45°-ban döntött képeket.\n\n"
+                    f"Mégis indítod a kalibrálást?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
 
         if self._capture_worker.isRunning():
             self._capture_worker.stop()
             self._capture_worker.wait(5000)
 
         self._log_txt.clear()
-        self._log_append(f"Kalibrálás indítása: {n} képpár, méret: {self._capture_worker.image_size}")
+        self._log_append(
+            f"Kalibrálás indítása: bal {n_l} kép, jobb {n_r} kép, {n_s} sztereó pár, "
+            f"méret: {self._capture_worker.image_size}"
+        )
+        if self._capture_worker._board_type == BoardType.CHARUCO:
+            logger.info(
+                "Kalibrálás indítása: bal %d kép (döntött ≥%.0f°: %d), jobb %d kép (döntött: %d), %d sztereó pár",
+                n_l, TILT_MIN_DEG, self._capture_worker.tilted_count("left"),
+                n_r, self._capture_worker.tilted_count("right"), n_s,
+            )
+            self._save_capture_data()
 
         board_type = self._capture_worker._board_type
 
@@ -1666,6 +1872,7 @@ class CalibrationDialog(QDialog):
             charuco_cr    = self._capture_worker.collected_charuco_corners_right,
             charuco_il    = self._capture_worker.collected_charuco_ids_left,
             charuco_ir    = self._capture_worker.collected_charuco_ids_right,
+            mono_charuco  = self._capture_worker.mono_charuco,
             parent        = self,
         )
         self._run_worker.log_line.connect(self._log_append)
@@ -1676,6 +1883,38 @@ class CalibrationDialog(QDialog):
         self._btn_run.setEnabled(False)
         self._btn_run.setText("⏳  Kalibrálás folyamatban...")
         self._tabs.setCurrentIndex(3)
+
+    def _save_capture_data(self) -> None:
+        """A rögzített nyers sarokpontokat elmenti, hogy a kalibráció később újrafuttatható/elemezhető legyen."""
+        w = self._capture_worker
+
+        def obj_array(items: list) -> np.ndarray:
+            arr = np.empty(len(items), dtype=object)
+            for i, item in enumerate(items):
+                arr[i] = item
+            return arr
+
+        path = Path(self._edit_out.text()).parent / f"capture_{time.strftime('%Y%m%d_%H%M%S')}.npz"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(
+                str(path),
+                image_size=np.array(w.image_size),
+                mono_left_corners=obj_array(w.mono_charuco["left"]["corners"]),
+                mono_left_ids=obj_array(w.mono_charuco["left"]["ids"]),
+                mono_left_tilts=np.array(w.mono_charuco["left"]["tilts"], dtype=np.float64),
+                mono_right_corners=obj_array(w.mono_charuco["right"]["corners"]),
+                mono_right_ids=obj_array(w.mono_charuco["right"]["ids"]),
+                mono_right_tilts=np.array(w.mono_charuco["right"]["tilts"], dtype=np.float64),
+                stereo_left_corners=obj_array(w.collected_charuco_corners_left),
+                stereo_left_ids=obj_array(w.collected_charuco_ids_left),
+                stereo_right_corners=obj_array(w.collected_charuco_corners_right),
+                stereo_right_ids=obj_array(w.collected_charuco_ids_right),
+            )
+            self._log_append(f"Nyers sarokpont-adatok mentve (utólagos elemzéshez): {path}")
+            logger.info("Nyers kalibrációs sarokpont-adatok mentve: %s", path)
+        except Exception as exc:
+            logger.warning("Nyers kalibrációs adatok mentése sikertelen: %s", exc)
 
     @pyqtSlot(str)
     def _log_append(self, msg: str) -> None:
@@ -1733,6 +1972,13 @@ class CalibrationDialog(QDialog):
         out.parent.mkdir(parents=True, exist_ok=True)
         r = self._last_result
         try:
+            had_world = False
+            if out.exists():
+                with np.load(str(out)) as old:
+                    had_world = "R_world_cam" in old.files
+                backup = out.with_name(f"{out.stem}_{time.strftime('%Y%m%d_%H%M%S')}.bak.npz")
+                shutil.copy2(out, backup)
+                self._log_append(f"Előző kalibráció biztonsági másolata: {backup}")
             np.savez(
                 str(out),
                 K1=r["K1"], D1=r["D1"], K2=r["K2"], D2=r["D2"],
@@ -1743,10 +1989,21 @@ class CalibrationDialog(QDialog):
                 baseline_mm=r["baseline_mm"],
             )
             self._log_append(f"✓ Fájl mentve: {out}")
-            QMessageBox.information(
-                self, "Mentés sikeres",
+            world_cmd = f"python scripts/calibrate_world.py --points {out.parent / 'points.json'}"
+            lost_txt = (
+                "Az előző fájlban lévő világ-transzformáció a mostani mentéssel ELVESZETT.\n"
+                if had_world else ""
+            )
+            self._log_append(f"⚠ Világ-transzformáció hiányzik → futtasd: {world_cmd}")
+            logger.warning("Sztereó kalibráció mentve világ-transzformáció nélkül → %s", world_cmd)
+            QMessageBox.warning(
+                self, "Mentés kész – világ-kalibráció szükséges!",
                 f"Kalibrációs fájl mentve:\n{out}\n\n"
-                f"A főprogram automatikusan betölti következő indításkor."
+                f"{lost_txt}"
+                f"Az új sztereó kalibráció NEM tartalmazza a kapu-koordináta (talajsík) "
+                f"transzformációt, enélkül az X/Y/Z tengelyek ferdék lesznek.\n\n"
+                f"Futtasd terminálban, majd indítsd újra a főprogramot:\n  {world_cmd}\n"
+                f"(új pontokhoz előbb, bezárt főprogrammal: python scripts/pick_world_points.py)"
             )
         except Exception as exc:
             QMessageBox.critical(self, "Mentési hiba", str(exc))

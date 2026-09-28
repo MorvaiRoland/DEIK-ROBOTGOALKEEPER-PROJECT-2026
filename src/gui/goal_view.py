@@ -199,9 +199,20 @@ class GoalViewWidget(QWidget):
         time_to_impact_s: float,
         in_goal: bool,
     ) -> None:
-        """Megkezd egy ShotDetector által megerősített lövést."""
-        if self._impact_x_mm is None:
-            self._set_active_impact(x_mm, y_mm, confidence, time_to_impact_s, in_goal)
+        """Megkezd egy ShotDetector által megerősített lövést.
+
+        Mindig felülírja az esetlegesen még aktív jelölést – a hívó
+        (MainWindow) source_sequence alapján már dedupliká, ezért itt nem
+        szabad az `_impact_x_mm is None` állapotra várni: ha egy korábbi
+        lövés `finish_shot()`-ja lekésett (pl. a megjelenítés ritkítása miatt
+        a COOLDOWN-átmenet frame-je kimaradt), a régi jelölés örökre beragadt
+        volna, és az új, valódi lövés sosem jelent volna meg a kapu-nézeten.
+        """
+        if self._impact_x_mm is not None:
+            # A korábbi lövés saját finish_shot()-ja lekésett – mentsük a
+            # történetbe/statisztikába, mielőtt felülírjuk az új adatokkal.
+            self._save_to_history()
+        self._set_active_impact(x_mm, y_mm, confidence, time_to_impact_s, in_goal)
 
     def update_shot(
         self,

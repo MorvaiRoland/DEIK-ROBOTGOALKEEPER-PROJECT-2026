@@ -62,7 +62,7 @@ class StereoPair:
     sync_delta_ms: float = 0.0
     # sync_delta_ms jelentése:
     #   -1.0  = HW GPIO mód, clock-offset kalibráció folyamatban
-    #    0.0  = szoftver szinkron (nincs mérés) vagy HW szinkron kivelős jitter
+    #    0.0  = szoftver szinkron (nincs mérés) vagy HW szinkron kivételesen alacsony jitter
     #   >0.0  = tényleges jitter ms-ben
 
 
@@ -337,7 +337,7 @@ class CameraManager:
                 sync_delta_ms = abs(raw_delta) * 1000.0
                 if sync_delta_ms > 5.0:
                     logger.warning(
-                        "Sztereo szinkron jitter NAGY [szoftver mód]: %.1f ms "
+                        "Sztereó szinkron jitter NAGY [szoftver mód]: %.1f ms "
                         "(bal=%.3f, jobb=%.3f) → 3D pontossági hiba lehetséges!",
                         sync_delta_ms,
                         frame_left.timestamp,

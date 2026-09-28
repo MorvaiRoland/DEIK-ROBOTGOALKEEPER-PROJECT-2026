@@ -337,6 +337,8 @@ class TrackingState:
     shot_active: bool = False
     shot_finished: bool = False
     shot_armed: bool = False
+    # A megerősítéskori Z-regresszió sebessége (mm/s) – ld. ShotStatus.confirmed_vz_trend_mm_s.
+    shot_confirmed_vz_trend_mm_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -352,6 +354,10 @@ class ShotStatus:
     # különben az állás közben felgyűlt zajos minták elrontják az impact-predikció
     # sebességbecslését (és ezzel az extrapolált X/Y-t).
     motion_started_event: bool = False
+    # A megerősítéskori Z-regresszió sebessége (mm/s) – ez a robusztus, tesztelt
+    # sebességjel (lásd kinematics_ok), szemben a TrajectoryPredictor saját, gyors
+    # lövésnél gyakran alulbecsült/lassan konvergáló sebességbecslésével.
+    confirmed_vz_trend_mm_s: float = 0.0
 
 
 class ShotDetector:
@@ -606,10 +612,14 @@ class ShotDetector:
                 "vz=%0.f mm/s, R²=%.2f (nincs érvényes becsapódás-predikció)",
                 self._samples[0][1], z_mm, traveled_mm, vz_trend, r2,
             )
-        return self._status(confirmed=True)
+        return self._status(confirmed=True, confirmed_vz_trend_mm_s=vz_trend)
 
     def _status(
-        self, confirmed: bool = False, finished: bool = False, motion_started_event: bool = False
+        self,
+        confirmed: bool = False,
+        finished: bool = False,
+        motion_started_event: bool = False,
+        confirmed_vz_trend_mm_s: float = 0.0,
     ) -> ShotStatus:
         return ShotStatus(
             confirmed=confirmed,
@@ -617,6 +627,7 @@ class ShotDetector:
             finished=finished,
             armed=self.is_armed,
             motion_started_event=motion_started_event,
+            confirmed_vz_trend_mm_s=confirmed_vz_trend_mm_s,
         )
 
     def reset(self) -> None:
@@ -783,14 +794,9 @@ class DetectionWorker(threading.Thread):
 
             # --- Mono mélység becslő ---
             mono_est = MonoDepthEstimator(self._config)
-            # Ha a kamerakábráció elérhető, frissítjük a fókuszivált sávot
+            # A nyers (torzított) pixelsugárhoz az eredeti K1 fókusz tartozik, nem a rektifikált P1-é.
             if triangulator.is_calibrated:
-                try:
-                    fx = float(triangulator._P1[0, 0]) if hasattr(triangulator, '_P1') else None
-                    if fx and fx > 100:
-                        mono_est.update_focal_length(fx)
-                except Exception:
-                    pass
+                mono_est.update_focal_length(triangulator.left_focal_length_px)
 
             # --- Lövés detektor (valódi lövés elkülönítése a normális mozgástól) ---
             shot_detector = ShotDetector(self._config)
@@ -824,6 +830,9 @@ class DetectionWorker(threading.Thread):
                 # The lock also makes live ROI updates safe while Ultralytics is running.
                 with self._detector_lock:
                     detection = detector.detect(snapshot.left_image, snapshot.right_image)
+                # Csak a YOLO/színfolt által ténylegesen MÉRT sugár használható mélységbecsléshez;
+                # az optikai flow (15 px) és a Kalman-coast (25 px) sugara kitalált érték.
+                left_measured = detection.left.found
 
                 # --- Optikai flow fallback: ha a YOLO nem talált labbát ---
                 if detection.left.found:
@@ -858,7 +867,7 @@ class DetectionWorker(threading.Thread):
                             timestamp=snapshot.timestamp,
                         )
 
-                # Reset optical flow ha mindkt kámera elbukik
+                # Optikai folyam visszaállítása ha mindkét kamera elveszíti a labdát
                 if not detection.left.found and not detection.right.found:
                     of_left.reset()
                     of_right.reset()
@@ -901,21 +910,16 @@ class DetectionWorker(threading.Thread):
                     if z_warn:
                         logger.warning("MonoZ: %s", z_warn)
                     pos_3d[2] = z_fused
-                elif pos_3d is None and left_valid and detection.left.radius > 0:
+                elif (pos_3d is None and left_valid and left_measured
+                      and detection.left.radius > 0):
                     # Szoftveres szinkron jitter vagy egykamerás takarás esetén: Mono mélység tartalék
                     z_fallback = mono_est.fallback_z(detection.left.radius)
                     if z_fallback is not None:
-                        f_px = float(mono_est.focal_length_px)
-                        cx = float(self._config.get("geometry", {}).get("principal_point_x", 968.0))
-                        cy = float(self._config.get("geometry", {}).get("principal_point_y", 608.0))
-
-                        # Pixel visszavetítés az EREDETI bal kamera keretbe, majd a
-                        # sztereóval AZONOS világ-transzformáció (kalibrált R_wc vagy tartalék).
-                        X_cam = (left_x - cx) * z_fallback / max(f_px, 1.0)
-                        Y_cam = (left_y - cy) * z_fallback / max(f_px, 1.0)
-
+                        # Pixel visszavetítés az EREDETI bal kamera keretbe (K1 + torzítás-korrekció),
+                        # majd a sztereóval AZONOS világ-transzformáció (kalibrált R_wc vagy tartalék).
+                        x_n, y_n = triangulator.left_pixel_to_normalized(left_x, left_y)
                         pos_3d = triangulator.leftcam_original_to_world(
-                            (X_cam, Y_cam, z_fallback)
+                            (x_n * z_fallback, y_n * z_fallback, z_fallback)
                         )
                         logger.debug("MonoZ 3D tartalék aktiválva: Z=%.0f mm", pos_3d[2])
 
@@ -1028,6 +1032,7 @@ class DetectionWorker(threading.Thread):
                         shot_active=shot_status.active,
                         shot_finished=shot_status.finished,
                         shot_armed=shot_status.armed,
+                        shot_confirmed_vz_trend_mm_s=shot_status.confirmed_vz_trend_mm_s,
                     )
                 )
         except Exception as exc:
@@ -1349,6 +1354,9 @@ class TrackerWorker(QThread):
                     "shot_active": state.shot_active if state else False,
                     "shot_finished": state.shot_finished if state else False,
                     "shot_armed": state.shot_armed if state else False,
+                    "shot_confirmed_vz_trend_mm_s": (
+                        state.shot_confirmed_vz_trend_mm_s if state else 0.0
+                    ),
                     "calibrated": state.calibrated if state else False,
                     "source_sequence": state.source_sequence if state else -1,
                     # Teljes képkori késés: a zöld jelöléshez tartozó bemeneti
@@ -2676,16 +2684,24 @@ class MainWindow(QMainWindow):
 
         # --- Lövés-jelölő pozíció a kapu-vizualizációhoz ---
         # A ballisztikus impact.y_mm (magasság) gyors lövésnél megbízhatatlan a sztereó
-        # Y-hiba miatt, ezért ha nincs érvényes predikció, a MÉRT pozícióra esünk vissza
-        # (az X = bal/jobb stabil), a magasságot pedig a kapu tartományába szorítjuk, hogy
-        # a jelölő a kereten belül, a helyes oldalon jelenjen meg.
+        # Y-hiba miatt, ezért a magasságot – ha van érvényes MÉRT pozíció – mindig onnan
+        # vesszük, nem a ballisztikus előrejelzésből (ami akár 0-ra is klampolódhat).
+        # Az X koordinátát a megbízható ballisztikus predikcióból vagy mérésből vesszük.
         goal_w = float(self._config.get("geometry", {}).get("goal_width_mm", 4000.0))
         goal_h = float(self._config.get("geometry", {}).get("goal_height_mm", 2000.0))
+        # Az `in_goal` eredményt is az X-alapú, megbízható margóellenőrzéssel számoljuk
+        # (nem `impact.in_goal`-ból, ami a törékeny ballisztikus Y-on múlik és gyors
+        # lövésnél szinte mindig False-t adna, l. shot_detection repo memória).
+        goal_margin_mm = float(self._config.get("geometry", {}).get("goal_margin_mm", 150.0))
         shot_pt: Optional[Tuple[float, float, float, float, bool]] = None
         if impact and impact.valid:
-            sy_disp = min(max(impact.y_mm, 0.0), goal_h)
+            if stats.get("pos_valid"):
+                sy_disp = min(max(float(stats.get("y_3d", impact.y_mm)), 0.0), goal_h)
+            else:
+                sy_disp = min(max(impact.y_mm, 0.0), goal_h)
+            eff_in_goal = abs(impact.x_mm) <= (goal_w / 2.0 + goal_margin_mm)
             shot_pt = (impact.x_mm, sy_disp, impact.confidence,
-                       impact.time_to_impact_s, impact.in_goal)
+                       impact.time_to_impact_s, eff_in_goal)
         elif (shot_confirmed_event or shot_active) and stats.get("pos_valid"):
             sx = float(stats.get("x_3d", 0.0))
             sy = min(max(float(stats.get("y_3d", goal_h / 2.0)), 0.0), goal_h)
@@ -2739,12 +2755,24 @@ class MainWindow(QMainWindow):
 
                 # ── Rekord mentés az analytics-be és session manager-be ──
                 if hasattr(self, "_analytics_view") and self._analytics_view:
-                    speed_kmh = (stats.get("speed_ms", 12.5) or 12.5) * 3.6
+                    # A ShotDetector saját Z-regressziójának sebessége (vz_trend) a
+                    # megerősítés alapja is, ezért robusztus/tesztelt – ellentétben a
+                    # TrajectoryPredictor pillanatnyi Kalman-sebességével, ami a lövés
+                    # elindulása után még nem konvergált, és jelentősen alábecsülhet.
+                    confirmed_vz = stats.get("shot_confirmed_vz_trend_mm_s", 0.0)
+                    if confirmed_vz:
+                        speed_mm_s = float(np.hypot(
+                            np.hypot(self._last_shot_vx, self._last_shot_vy), confirmed_vz
+                        ))
+                        speed_kmh = speed_mm_s / 1000.0 * 3.6
+                    else:
+                        speed_kmh = (stats.get("speed_ms", 12.5) or 12.5) * 3.6
                     sector = self._determine_defense_zone(px_mm, py_mm)
 
-                    # Y érték forrása
-                    _imp = stats.get("impact")
-                    y_source = "pred" if (_imp and _imp.valid) else "mért"
+                    # Y érték forrása – a magasság a MÉRT pozícióból jön, ha érvényes
+                    # (a ballisztikus predikció Y-a gyors lövésnél megbízhatatlan),
+                    # csak érvénytelen mérés esetén esünk vissza a predikcióra.
+                    y_source = "mért" if stats.get("pos_valid") else "pred"
 
                     # Kapus reakcióidő: lövés megerősítés → parancs küldés
                     goalkeeper_reaction_ms = 0.0
@@ -2773,10 +2801,8 @@ class MainWindow(QMainWindow):
                         ))
                         goalkeeper_travel_ms = (dist_mm / 1000.0) / self._last_goalkeeper_speed_m_s * 1000.0
 
-                    # Detektálási módszer meghatározása
+                    # Detektálási módszer: jelenleg kizárólag YOLO TensorRT GPU inferencia
                     det_method = "YOLO"
-                    if hasattr(stats.get("impact"), "valid"):
-                        pass  # később bővíthető
 
                     # Z pozíció rögzítés
                     z_now = stats.get("z_3d", 0.0)
@@ -2800,7 +2826,7 @@ class MainWindow(QMainWindow):
                         vx_mm_s=self._last_shot_vx,
                         vy_mm_s=self._last_shot_vy,
                         vz_mm_s=self._last_shot_vz,
-                        z_start_mm=0.0,   # TODO: ShotDetector-ből
+                        z_start_mm=0.0,   # Lövés induló Z-pozíciója (ShotDetector.samples[0][1] alapján töltendő be)
                         z_end_mm=z_now,
                         det_method=det_method,
                         conf_left=stats.get("conf_left", 0.0),
@@ -2810,7 +2836,7 @@ class MainWindow(QMainWindow):
                     if record and hasattr(self, '_session_manager'):
                         self._session_manager.save_shot(record)
                         logger.info(
-                            "TELEMETRIA MENTS: X=%.0f Y=%.0f (fRRás: %s) "
+                            "TELEMETRIA MENTVE: X=%.0f Y=%.0f (forrás: %s) "
                             "v=(%.0f, %.0f, %.0f) mm/s | det_lat=%.1f ms | pipeline=%.1f ms | "
                             "kapus_reakció=%.1f ms | kapus_utazás=%.1f ms",
                             px_mm, py_mm, y_source,

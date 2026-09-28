@@ -109,7 +109,7 @@ class StereoTriangulator:
         self._map2_R: Optional[np.ndarray] = None
 
         # Baseline (fallback, ha még nincs kalibrálás)
-        # FONTOS: A default értékek a fizikailag mért kamera-geometriát tükrözik.
+        # Fontos: A default értékek a fizikailag mért kamera-geometriát tükrözik.
         # Baseline = 2300 mm (mérve), ne változtasd config nélkül!
         self._baseline_mm = float(self._geo_cfg.get("baseline_mm", 2300.0))
 
@@ -117,7 +117,7 @@ class StereoTriangulator:
         self._is_calibrated = False
 
         # Fizikai kamera pozíciók (config-ból, fizikailag mért értékek)
-        # FONTOS: ezeket CSAK a config-alapú tartalék world-transzformáció használja,
+        # Fontos: ezeket CSAK a config-alapú tartalék world-transzformáció használja,
         # amikor nincs kalibrált merev transzformáció (R_world_cam/t_world_cam) a .npz-ben.
         self._left_cam_x_mm  = float(self._geo_cfg.get("left_camera_x_mm",  -1150.0))
         self._cam_height_mm  = float(self._geo_cfg.get("camera_height_mm",   2800.0))
@@ -235,7 +235,7 @@ class StereoTriangulator:
         """
         Becsült paraméterek beállítása kalibrálás nélküli módhoz.
 
-        FIGYELEM: Ez csak közelítő értékeket ad! A pontos 3D pozícióhoz
+        Figyelem: Ez csak közelítő értékeket ad! A pontos 3D pozícióhoz
         kalibrálás szükséges. Fejlesztési/tesztelési célra elegendő.
         """
         logger.warning("Kalibrálás nélküli mód: becsült paraméterekkel dolgozom!")
@@ -300,7 +300,7 @@ class StereoTriangulator:
         )
 
         # Frissített projekciós mátrixok + rektifikációs forgatások
-        # FONTOS: R1/R2 kell a triangulációhoz (undistortPoints R paramétere),
+        # Fontos: R1/R2 kell a triangulációhoz (undistortPoints R paramétere),
         # különben a 2D pontok nem a rektifikált keretben vannak → hibás 3D.
         self._R1 = R1
         self._R2 = R2
@@ -431,6 +431,19 @@ class StereoTriangulator:
         z_goal = z_fwd + self._cam_z_offset_mm
         return np.array([x_goal, y_goal, z_goal], dtype=np.float64)
 
+    @property
+    def left_focal_length_px(self) -> float:
+        """Az EREDETI (nem rektifikált) bal kamera fókusztávolsága pixelben (K1)."""
+        K = self._K1 if self._K1 is not None else self._K_est
+        return float(K[0, 0])
+
+    def left_pixel_to_normalized(self, u: float, v: float) -> Tuple[float, float]:
+        """Nyers bal kamera pixel → torzításmentes normalizált (X/Z, Y/Z) az eredeti bal kamera keretben."""
+        K = self._K1 if self._K1 is not None else self._K_est
+        D = self._D1 if self._D1 is not None else np.zeros(5, dtype=np.float64)
+        pt = cv2.undistortPoints(np.array([[[u, v]]], dtype=np.float64), K, D)
+        return float(pt[0, 0, 0]), float(pt[0, 0, 1])
+
     def leftcam_original_to_world(self, p_cam: np.ndarray) -> np.ndarray:
         """
         EREDETI BAL kamera optikai keretbeli pontot (X, Y, Z) kapu-koordinátává alakít.
@@ -485,16 +498,23 @@ class StereoTriangulator:
         return np.column_stack((Xc, Yc, Zc)).astype(np.float64)
 
     @staticmethod
-    def _rigid_transform_3d(src: np.ndarray, dst: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _rigid_transform_3d(
+        src: np.ndarray,
+        dst: np.ndarray,
+        allow_reflection: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Kabsch–Umeyama merev illesztés (skálázás nélkül): dst ≈ R @ src + t.
 
         Args:
             src: (N, 3) forráspontok (rektifikált kamera keret)
             dst: (N, 3) célpontok (kapu-koordináta, mért)
+            allow_reflection: Ha True, megengedi a det(R) = -1 ortogonális
+                transzformációt (szükséges, ha src és dst ellenkező kezességű,
+                pl. OpenCV kamera keret Y-lefelé vs kapu-keret Y-felfelé).
 
         Returns:
-            (R 3×3 forgatás, t 3× eltolás)
+            (R 3×3 forgatás/ortogonális mátrix, t 3× eltolás)
         """
         src = np.asarray(src, dtype=np.float64).reshape(-1, 3)
         dst = np.asarray(dst, dtype=np.float64).reshape(-1, 3)
@@ -507,8 +527,8 @@ class StereoTriangulator:
         H = src_c.T @ dst_c
         U, _, Vt = np.linalg.svd(H)
         R = Vt.T @ U.T
-        # Tükrözés kiszűrése (det(R) = +1 valódi forgatás legyen)
-        if np.linalg.det(R) < 0:
+        # Tükrözés kiszűrése csak akkor, ha nem engedélyezett (pl. azonos kezességű rendszereknél)
+        if not allow_reflection and np.linalg.det(R) < 0:
             Vt[-1, :] *= -1.0
             R = Vt.T @ U.T
         t = centroid_dst - R @ centroid_src
@@ -537,7 +557,20 @@ class StereoTriangulator:
                 f"Legalább 3, azonos számú pontpár kell (kapott: cam={len(cam)}, world={len(wld)})"
             )
 
-        R, t = self._rigid_transform_3d(cam, wld)
+        # OpenCV (Y-lefelé, jobbkezes) és a kapu-keret (Y-felfelé, balkezes)
+        # ellenkező kezességű, így az ortogonális transzformáció determinánsa -1.
+        R, t = self._rigid_transform_3d(cam, wld, allow_reflection=True)
+
+        # Ha a talajpontok (Y=0) miatt az Y-tengely normálisa határozatlan lenne az SVD-ben:
+        # A fizikai kényszert alkalmazzuk:
+        # - A kamera a talaj felett van: t_y > 0
+        # - A lefelé dőlő kamera képen a lefelé mozgás a világban is lefelé irányul: R[1, 1] < 0.
+        is_coplanar_ground = np.std(wld[:, 1]) < 10.0
+        if is_coplanar_ground:
+            if R[1, 1] > 0 or t[1] < 0:
+                R[1, :] *= -1.0
+                t[1] = wld.mean(axis=0)[1] - float(R[1, :] @ cam.mean(axis=0))
+
         self._R_wc = R
         self._t_wc = t
 

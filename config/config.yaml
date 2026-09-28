@@ -60,29 +60,29 @@ camera:
 
   # Alapértelmezett fehéregyensúly (White Balance)
   auto_white_balance: true
-  wb_kr: 1.8   # Piros erősítés (ha auto_white_balance: false)
+  wb_kr: 1.722   # Piros erősítés (ha auto_white_balance: false)
   wb_kg: 1.0   # Zöld erősítés
-  wb_kb: 2.1   # Kék erősítés
+  wb_kb: 2.329   # Kék erősítés
 
   # ----- Egyedi beállítások a BAL kamerára -----
   left:
     serial_number: "CACAU2546000"
     exposure_time_us: 3000
     gain_db: 0.0
-    auto_white_balance: true
-    wb_kr: 1.8
+    auto_white_balance: false
+    wb_kr: 1.722
     wb_kg: 1.0
-    wb_kb: 2.1
+    wb_kb: 2.329
 
   # ----- Egyedi beállítások a JOBB kamerára -----
   right:
     serial_number: "CACAU2517001"
     exposure_time_us: 3000
     gain_db: 0.0
-    auto_white_balance: true
-    wb_kr: 1.8
+    auto_white_balance: false
+    wb_kr: 1.76 
     wb_kg: 1.0
-    wb_kb: 2.1
+    wb_kb: 2.349
 
   # =============================================================================
   # Hardveres GPIO szinkronizáció (CBL-702-8P-SYNC-5M0 kábel)
@@ -157,7 +157,7 @@ geometry:
   # Képközéppont (principal point) – placeholder a beállított felbontás közepén.
   # FIGYELEM: A pontos értéket a sztereó kalibrálás (K1/K2) adja meg és felülírja!
   #           Ez csak a kalibrálás előtti / mono-fallback becsléshez használt kezdőérték.
-  principal_point_x: 844.0    # = 1688 / 2 (beállított szélesség)
+  principal_point_x: 908.0    # = 1816 / 2 (beállított szélesség)
   principal_point_y: 608.0    # = 1216 / 2 (beállított magasság)
 
   # =========================================================================
@@ -197,7 +197,7 @@ geometry:
   # tényleges dőlése (nem a konzol beállított szöge). Csak a config-alapú tartalék
   # world-transzformáció használja. A talajon lévő labda Y≈0 feltétele a pitch ÉS a
   # camera_height_mm együttes helyességétől függ – ezért ajánlott a calibrate_world.py.
-  camera_pitch_deg: 29
+  camera_pitch_deg: 29.5
 
   # ----- Kapu mérete -----
   goal_width_mm: 4000.0       # 4 méter széles
@@ -280,7 +280,7 @@ ball:
     enabled: true
     h_min: 5       # Narancssárga hue alsó határ (OpenCV: 0-180)
     h_max: 25      # Narancssárga hue felső határ
-    s_min: 75      # Finomhangolt szaturáció (átengedi a fehér mintás labdát is)
+    s_min: 85      # Finomhangolt szaturáció (átengedi a fehér mintás labdát is)
     s_max: 255
     v_min: 60      # Minimum világosság
     v_max: 255
@@ -396,9 +396,9 @@ shot_detection:
   min_speed_mm_s: 4000.0
   min_r2: 0.50
 
-  # A labdának ténylegesen el kell érnie ezt a Z vonalat (mm) mielőtt a lövés megerősítésre kerül.
-  # Ez kiszűri a hamis detektálásokat ahol a rendszer „lát" egy lövést ami még messze van,
-  # de soha nem éri el ténylegesen a kaput. Alapértelmezés: 1500 mm (1.5 méter a kaputól).
+  # A labdának el kell érnie ezt a Z távolságot (mm) mielőtt a lövés megerősítésre kerül.
+  # Minél korábban (nagyobb Z értéknél) erősítjük meg, annál több ideje marad a fizikai motornak mozogni.
+  # Jelenlegi beállítás: 5000.0 mm (5 méter a kaputól).
   confirm_z_mm: 5000.0
 
   # A lövés MEGERŐSÍTÉSE alapból a labda MOZGÁSÁN múlik (gyors, konzisztens, kapu felé

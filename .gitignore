@@ -51,6 +51,10 @@ models/*.trt
 data/recordings/
 !data/recordings/.gitkeep
 
+# Futás közben keletkező adatok (lövés-munkamenetek, fényviszony-ellenőrző képek)
+data/sessions/*.jsonl
+data/lighting_check_*.png
+
 # Numpy / pickle adatfájlok
 *.npy
 *.npz

@@ -107,7 +107,7 @@ class MonoDepthEstimator:
         Validálja a sztereó Z-t a mono becslés alapján, majd fúzióval finomítja.
 
         Args:
-            z_stereo_mm: Sztereo triangulációból kapott Z (mm)
+            z_stereo_mm: Sztereó triangulációból kapott Z (mm)
             radius_px:   Labda sugara pixelben
 
         Returns:
@@ -119,7 +119,7 @@ class MonoDepthEstimator:
         z_mono = self.estimate_z(radius_px)
 
         if z_mono is None:
-            # Nem tudunk validálni – elfogadjuk a sztereo értéket
+            # Nem tudunk validálni – elfogadjuk a sztereó értéket
             return z_stereo_mm, True, None
 
         diff = abs(z_stereo_mm - z_mono)
@@ -134,7 +134,7 @@ class MonoDepthEstimator:
             logger.debug(warning)
             return z_stereo_mm, False, None
 
-        # Amikor a sztereo trianguláció kalibrált és érvényes, a sztereo Z a legpontosabb.
+        # Amikor a sztereó trianguláció kalibrált és érvényes, a sztereó Z a legpontosabb.
         # Megtartjuk a sztereó Z értéket, a mono csak ellenőrzésre szolgál.
         return z_stereo_mm, True, None
 

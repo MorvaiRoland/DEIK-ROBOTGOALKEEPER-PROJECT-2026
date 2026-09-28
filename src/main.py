@@ -214,7 +214,7 @@ def run_health_check(config: dict) -> list:
             "text": f"AI modell nem található: {model_path}"
         })
 
-    # 3. Kalibraciós fájl
+    # 3. Kalibrációs fájl
     cal_path = config.get("stereo", {}).get(
         "calibration_file", "data/calibration/stereo_calibration.npz"
     )
@@ -222,12 +222,12 @@ def run_health_check(config: dict) -> list:
     if os.path.exists(full_cal):
         results.append({
             "icon": "✓", "level": "ok",
-            "text": f"Kalibració: {cal_path} megtalálva"
+            "text": f"Kalibráció: {cal_path} megtalálva"
         })
     else:
         results.append({
             "icon": "⚠", "level": "warning",
-            "text": f"Nincs kalibrációs fájl – szükséges a kalibració előtt!"
+            "text": f"Nincs kalibrációs fájl – használat előtt kalibráció szükséges!"
         })
 
     # 4. Szabad RAM
@@ -248,7 +248,7 @@ def run_health_check(config: dict) -> list:
         else:
             results.append({
                 "icon": "✗", "level": "error",
-                "text": f"RAM: kritíkusan alacsony ({avail_gb:.1f} GB szabad)!"
+                "text": f"RAM: kritikusan alacsony ({avail_gb:.1f} GB szabad)!"
             })
     except Exception:
         pass
@@ -258,7 +258,7 @@ def run_health_check(config: dict) -> list:
     if cam_type == "ximea":
         results.append({
             "icon": "✓", "level": "ok",
-            "text": "Kamera: Ximea CMOS sztereó kámera mód aktiv"
+            "text": "Kamera: Ximea CMOS sztereó kamera mód aktív"
         })
     else:
         results.append({
@@ -311,7 +311,7 @@ def start_gui(config: dict) -> None:
     window.showFullScreen()
     splash.close()
 
-    logging.info("GUI elindult – kattints a INDÍTÁS gombra a kamerák aktiválásához")
+    logging.info("GUI elindult – kattints az INDÍTÁS gombra a kamerák aktiválásához")
 
     # Qt eseményciklus futtatása (blokkol amíg az ablak nyitva van)
     exit_code = app.exec()
@@ -374,7 +374,7 @@ def start_headless(config: dict) -> None:
                         "IMPACT  X=%+.0f mm  Y=%.0f mm  T=%.3f s  Conf=%.0f%%  %s",
                         impact.x_mm, impact.y_mm, impact.time_to_impact_s,
                         impact.confidence * 100,
-                        "GOOL IRÁNY!" if impact.in_goal else "mellé"
+                        "GÓL IRÁNY!" if impact.in_goal else "mellé"
                     )
 
     except KeyboardInterrupt:

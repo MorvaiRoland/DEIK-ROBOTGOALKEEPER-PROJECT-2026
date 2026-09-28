@@ -14,6 +14,12 @@
 
 set -e  # Ha bármely parancs hibával zárul, leállunk
 
+# Projekt gyökérkönyvtárának meghatározása és belépés
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_DIR"
+
+
 # --- Színkódok a terminálkimenethez ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'

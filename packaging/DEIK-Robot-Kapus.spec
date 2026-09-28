@@ -1,7 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('config', 'config'), ('assets', 'assets')]
+SPEC_DIR = Path(SPECPATH)
+PROJECT_DIR = SPEC_DIR.parent if SPEC_DIR.name == "packaging" else SPEC_DIR
+
+datas = [
+    (str(PROJECT_DIR / 'config'), 'config'),
+    (str(PROJECT_DIR / 'assets'), 'assets'),
+]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('ximea')
@@ -13,8 +21,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['src/main.py'],
-    pathex=[],
+    [str(PROJECT_DIR / 'src' / 'main.py')],
+    pathex=[str(PROJECT_DIR / 'src'), str(PROJECT_DIR)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -43,7 +51,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets/deik_logo.png'],
+    icon=[str(PROJECT_DIR / 'assets' / 'deik_logo.png')],
 )
 coll = COLLECT(
     exe,
