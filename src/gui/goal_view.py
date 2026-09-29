@@ -172,10 +172,15 @@ class GoalViewWidget(QWidget):
         self._lbl_hud_status.setStyleSheet(f"font-size: 11px; font-weight: 800; color: {color}; background: transparent;")
 
     def set_goalkeeper_target(self, x_mm: float, y_mm: float = 1000.0) -> None:
-        """Beállítja a dőlési célpozíciót az X koordináta alapján (középről balra/jobbra dőlés)."""
-        half_w = self._goal_width_mm / 2.0
-        norm_x = max(-1.0, min(1.0, x_mm / half_w))
-        self._gk_target_tilt_deg = norm_x * 55.0  # Max ±55 fokos dőlés
+        """Beállítja a dőlési célpozíciót a becsapódási pont (X, Y) alapján."""
+        self._gk_target_tilt_deg = self._tilt_for(x_mm, y_mm)
+
+    def _tilt_for(self, x_mm: float, y_mm: Optional[float]) -> float:
+        # A kapus az alsó-középső csukló körül dől, ezért a becsapódási pont felé mutat.
+        if y_mm is None:
+            return max(-1.0, min(1.0, x_mm / (self._goal_width_mm / 2.0))) * 55.0
+        angle = math.degrees(math.atan2(x_mm, max(y_mm, 0.0)))
+        return max(-55.0, min(55.0, angle))
 
     def update_impact(
         self,
@@ -251,9 +256,7 @@ class GoalViewWidget(QWidget):
         self._time_to_impact_s = time_to_impact_s
         self._in_goal = in_goal
 
-        half_w = self._goal_width_mm / 2.0
-        norm_x = max(-1.0, min(1.0, x_mm / half_w))
-        self._gk_target_tilt_deg = norm_x * 55.0
+        self._gk_target_tilt_deg = self._tilt_for(x_mm, y_mm)
         self._gk_state = "MOVING"
         self._update_hud_status_label()
         self.update()
@@ -300,10 +303,13 @@ class GoalViewWidget(QWidget):
 
     def _save_to_history(self) -> None:
         if self._impact_x_mm is not None and self._impact_y_mm is not None:
-            # Ellenőrizzük a dőléssel elért pozíciót a védés szempontjából
+            # Ellenőrizzük a dőléssel elért pozíciót a védés szempontjából:
+            # a labda merőleges távolsága a dőlt kapus tengelyétől.
             half_w = self._goal_width_mm / 2.0
-            reach_x = (self._gk_tilt_angle_deg / 55.0) * (half_w * 0.85)
-            dist_to_gk = abs(self._impact_x_mm - reach_x)
+            theta = math.radians(self._gk_tilt_angle_deg)
+            dist_to_gk = abs(
+                self._impact_x_mm * math.cos(theta) - self._impact_y_mm * math.sin(theta)
+            )
 
             is_saved = dist_to_gk <= (self._gk_reach_width_mm / 2.0)
             if is_saved:

@@ -208,6 +208,9 @@ geometry:
   # egy súroló/talajon guruló, ténylegesen kapuba tartó lövés Y≈0-nál (vagy egy
   # kapufa mellett) hamis negatívnak (in_goal=False) számítana.
   goal_margin_mm: 150.0
+  # Kézi Y-korrekció (mm) a kapu-jelölő / telemetria / kapus-cél magasságára.
+  # Negatív = lejjebb tolja (mérés alapján a jelölő ~15-20 cm-rel magasabban volt).
+  impact_y_offset_mm: -175.0
 
   # ----- Pálya -----
   # A lövő helye (ahol a labdát rúgják)
@@ -462,6 +465,9 @@ gui:
     show_impact_prediction: true  # Becsapódási pont
     show_shot_history: true       # Korábbi lövések
     max_shot_history: 15          # Maximum megőrzött lövés
+    # A megerősített lövés jelölőjét legfeljebb ennyi (mindkét kamerás, sztereó)
+    # mérés finomítja, utána rögzül; az első rossz/hiányzó mérésnél azonnal rögzül.
+    marker_lock_samples: 8
 
 
 # =============================================================================

@@ -339,6 +339,9 @@ class TrackingState:
     shot_armed: bool = False
     # A megerősítéskori Z-regresszió sebessége (mm/s) – ld. ShotStatus.confirmed_vz_trend_mm_s.
     shot_confirmed_vz_trend_mm_s: float = 0.0
+    # Mindkét kamera ténylegesen (YOLO/színfolt) mérte a labdát, és a pozíció valódi
+    # sztereó triangulációból jön (nem optikai flow / Kalman-coast / mono tartalék).
+    stereo_measured: bool = False
 
 
 @dataclass(frozen=True)
@@ -833,6 +836,7 @@ class DetectionWorker(threading.Thread):
                 # Csak a YOLO/színfolt által ténylegesen MÉRT sugár használható mélységbecsléshez;
                 # az optikai flow (15 px) és a Kalman-coast (25 px) sugara kitalált érték.
                 left_measured = detection.left.found
+                right_measured = detection.right.found
 
                 # --- Optikai flow fallback: ha a YOLO nem talált labbát ---
                 if detection.left.found:
@@ -1033,6 +1037,9 @@ class DetectionWorker(threading.Thread):
                         shot_finished=shot_status.finished,
                         shot_armed=shot_status.armed,
                         shot_confirmed_vz_trend_mm_s=shot_status.confirmed_vz_trend_mm_s,
+                        stereo_measured=(
+                            stereo_pos_valid and left_measured and right_measured
+                        ),
                     )
                 )
         except Exception as exc:
@@ -1357,6 +1364,7 @@ class TrackerWorker(QThread):
                     "shot_confirmed_vz_trend_mm_s": (
                         state.shot_confirmed_vz_trend_mm_s if state else 0.0
                     ),
+                    "stereo_measured": state.stereo_measured if state else False,
                     "calibrated": state.calibrated if state else False,
                     "source_sequence": state.source_sequence if state else -1,
                     # Teljes képkori késés: a zöld jelöléshez tartozó bemeneti
@@ -1529,6 +1537,14 @@ class MainWindow(QMainWindow):
         self._shot_active_ui = False
         self._auto_arm_enabled = bool(config.get("shot_detection", {}).get("auto_rearm", False))
         self._last_handled_shot_sequence = -1
+        # Kapu-jelölő rögzítése: a megerősítés után legfeljebb ennyi jó sztereó
+        # mérés frissítheti, az első rossz/hiányzó mérésnél azonnal befagy.
+        self._marker_lock_samples = max(1, int(
+            config.get("gui", {}).get("goal_view", {}).get("marker_lock_samples", 5)
+        ))
+        self._shot_marker_samples = 0
+        self._shot_marker_locked = False
+        self._last_marker_sequence = -1
         self._shot_arm_time: float = 0.0
         # ── Lövés telemetria követés ─────────────────────────────────────────
         # Az időpont, amikor a ShotDetector megerősítette a lövést
@@ -2693,19 +2709,44 @@ class MainWindow(QMainWindow):
         # (nem `impact.in_goal`-ból, ami a törékeny ballisztikus Y-on múlik és gyors
         # lövésnél szinte mindig False-t adna, l. shot_detection repo memória).
         goal_margin_mm = float(self._config.get("geometry", {}).get("goal_margin_mm", 150.0))
+        y_off = float(self._config.get("geometry", {}).get("impact_y_offset_mm", 0.0))
         shot_pt: Optional[Tuple[float, float, float, float, bool]] = None
         if impact and impact.valid:
             if stats.get("pos_valid"):
-                sy_disp = min(max(float(stats.get("y_3d", impact.y_mm)), 0.0), goal_h)
+                sy_disp = min(max(float(stats.get("y_3d", impact.y_mm)) + y_off, 0.0), goal_h)
             else:
-                sy_disp = min(max(impact.y_mm, 0.0), goal_h)
+                sy_disp = min(max(impact.y_mm + y_off, 0.0), goal_h)
             eff_in_goal = abs(impact.x_mm) <= (goal_w / 2.0 + goal_margin_mm)
             shot_pt = (impact.x_mm, sy_disp, impact.confidence,
                        impact.time_to_impact_s, eff_in_goal)
         elif (shot_confirmed_event or shot_active) and stats.get("pos_valid"):
             sx = float(stats.get("x_3d", 0.0))
-            sy = min(max(float(stats.get("y_3d", goal_h / 2.0)), 0.0), goal_h)
+            sy = min(max(float(stats.get("y_3d", goal_h / 2.0)) + y_off, 0.0), goal_h)
             shot_pt = (sx, sy, 0.5, 0.0, abs(sx) <= goal_w / 2.0)
+
+        # A labda a kapu közelében kiesik a látómezőből / bemozdul, onnan a becslés
+        # romlik – ezért a jelölőt csak az első néhány jó sztereó mérés finomítja.
+        marker_update = False
+        if shot_confirmed_event:
+            self._shot_marker_samples = 1
+            self._shot_marker_locked = self._marker_lock_samples <= 1
+            self._last_marker_sequence = source_sequence
+        elif (shot_active and not self._shot_marker_locked
+              and source_sequence != self._last_marker_sequence):
+            self._last_marker_sequence = source_sequence
+            if shot_pt is not None and stats.get("stereo_measured", False):
+                marker_update = True
+                self._shot_marker_samples += 1
+                if self._shot_marker_samples >= self._marker_lock_samples:
+                    self._shot_marker_locked = True
+            else:
+                self._shot_marker_locked = True
+            if self._shot_marker_locked:
+                logger.info(
+                    "Kapu-jelölő rögzítve %d jó mérés után%s",
+                    self._shot_marker_samples,
+                    "" if marker_update else " (labda elveszett / nem sztereó mérés)",
+                )
 
         if shot_pt is not None:
             px_mm, py_mm, pconf, pt_s, p_in_goal = shot_pt
@@ -2714,7 +2755,7 @@ class MainWindow(QMainWindow):
                     continue
                 if shot_confirmed_event:
                     gv.begin_shot(px_mm, py_mm, pconf, pt_s, p_in_goal)
-                elif shot_active:
+                elif marker_update:
                     gv.update_shot(px_mm, py_mm, pconf, pt_s, p_in_goal)
 
             if shot_confirmed_event:
@@ -2734,8 +2775,8 @@ class MainWindow(QMainWindow):
                     gk_x = float(np.clip(impact.x_mm,
                         -float(self._config.get("geometry", {}).get("goal_width_mm", 4000)) / 2.0,
                          float(self._config.get("geometry", {}).get("goal_width_mm", 4000)) / 2.0))
-                    gk_y = float(np.clip(impact.y_mm, 0.0,
-                        float(self._config.get("geometry", {}).get("goal_height_mm", 2000))))
+                    # Y: ugyanaz a (mért, klampolt) magasság, mint a jelölőn – a ballisztikus impact.y_mm gyors lövésnél hibás.
+                    gk_y = py_mm
                     self._last_goalkeeper_x_mm = gk_x
                     self._last_goalkeeper_y_mm = gk_y
                     self._last_goalkeeper_speed_m_s = getattr(
@@ -2749,7 +2790,7 @@ class MainWindow(QMainWindow):
                     if hasattr(self, "_goal_view_full") and self._goal_view_full:
                         self._goal_view_full.set_goalkeeper_target(gk_x, gk_y)
                     logger.info(
-                        "Kapus automatikus küldés: X=%.0f mm, Y=%.0f mm (impact pred)",
+                        "Kapus automatikus küldés: X=%.0f mm (impact pred), Y=%.0f mm",
                         gk_x, gk_y
                     )
 
