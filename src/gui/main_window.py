@@ -45,7 +45,7 @@ from PyQt6.QtWidgets import (
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QSizePolicy, QSlider, QSpinBox, QDoubleSpinBox, QStackedWidget, QStatusBar, QTabWidget,
-    QToolBar, QVBoxLayout, QWidget
+    QToolBar, QToolButton, QVBoxLayout, QWidget
 )
 
 from camera.camera_manager import CameraManager, StereoPair
@@ -1535,7 +1535,6 @@ class MainWindow(QMainWindow):
         self._is_running = False
         self._shot_armed_ui = False
         self._shot_active_ui = False
-        self._auto_arm_enabled = bool(config.get("shot_detection", {}).get("auto_rearm", False))
         self._last_handled_shot_sequence = -1
         # Kapu-jelölő rögzítése: a megerősítés után legfeljebb ennyi jó sztereó
         # mérés frissítheti, az első rossz/hiányzó mérésnél azonnal befagy.
@@ -1560,6 +1559,11 @@ class MainWindow(QMainWindow):
         self._last_shot_vx: float = 0.0
         self._last_shot_vy: float = 0.0
         self._last_shot_vz: float = 0.0
+        # ── Csavar/kurva X-trend korrekció ──────────────────────────────────
+        # Aktív lövés alatt a stereo_measured frame-ek (x_3d, z_3d, t) mintái.
+        # A ballisztikus impact.x_mm helyett ezek lineáris extrapol. pontosabb
+        # csavart/ívelt labdánál, ahol a pálya nem egyenes vonal.
+        self._shot_x_trend_buf: list = []   # [(x_mm, z_mm, perf_counter), ...]
         # ──────────────────────────────────────────────────
         session_dir = config.get("session", {}).get("session_dir", "data/sessions")
         self._session_manager = SessionManager(session_dir=session_dir)
@@ -1587,10 +1591,6 @@ class MainWindow(QMainWindow):
         self._build_ui()
 
         self._apply_theme_to_ui()
-
-        # Auto-élesítés checkbox állapot a config alapján
-        if hasattr(self, '_chk_auto_arm'):
-            self._chk_auto_arm.setChecked(self._auto_arm_enabled)
 
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._update_system_status)
@@ -1715,16 +1715,6 @@ class MainWindow(QMainWindow):
         self._btn_shot_arm.setEnabled(False)
         self._btn_shot_arm.clicked.connect(self._on_arm_next_shot)
         toolbar.addWidget(self._btn_shot_arm)
-
-        self._chk_auto_arm = QCheckBox("AUTO ÉLESÍTÉS")
-        self._chk_auto_arm.setFixedHeight(40)
-        self._chk_auto_arm.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._chk_auto_arm.setToolTip(
-            "Bekapcsolva: minden lövés után automatikusan élesít a következőre.\n"
-            "Kikapcsolva: manuális élesítés szükséges minden lövés előtt."
-        )
-        self._chk_auto_arm.toggled.connect(self._on_auto_arm_toggled)
-        toolbar.addWidget(self._chk_auto_arm)
 
         toolbar.addSeparator()
 
@@ -1953,6 +1943,11 @@ class MainWindow(QMainWindow):
         """Reszponzív Vezérlő Dock Panel szegmentált gombokkal és QStackedWidget-tel."""
         dock = QDockWidget("Kamera Pozícionálás & ROI Vezérlés", self)
         dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
+        # Bezárás gomb helyett összecsukható fejléc – mozgatás/lebegtetés megmarad.
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
 
         self._cam_widgets = {}
 
@@ -2007,6 +2002,80 @@ class MainWindow(QMainWindow):
 
         dock.setWidget(dock_widget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self._build_dock_titlebar(dock, dock_widget, "Kamera Pozícionálás & ROI Vezérlés")
+        self._control_dock = dock
+
+    def _build_dock_titlebar(self, dock: QDockWidget, content_widget: QWidget, title_text: str) -> None:
+        """Egyedi dock-fejléc: az X (bezárás) gomb helyett összecsukás/kinyitás – a mozgatás megmarad."""
+        bar = QWidget()
+        bar_layout = QHBoxLayout(bar)
+        bar_layout.setContentsMargins(10, 4, 6, 4)
+        bar_layout.setSpacing(4)
+
+        lbl = QLabel(title_text)
+        lbl.setObjectName("dockTitleLabel")
+        bar_layout.addWidget(lbl, stretch=1)
+
+        btn_collapse = QToolButton()
+        btn_collapse.setObjectName("dockCollapseButton")
+        btn_collapse.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_collapse.setFixedSize(22, 22)
+        btn_collapse.setText("▶")
+        btn_collapse.setToolTip("Panel összecsukása")
+
+        # A panel a jobb oldalon teljes magasságban dokkolt, ezért a SZÉLESSÉGÉT
+        # kell összehúzni (nem a magasságát) – különben a tartalom elrejtése után
+        # a dokk-oszlop üresen, nagy fehér területként maradna meg a helyén.
+        _COLLAPSED_WIDTH = 30
+
+        def toggle_collapse() -> None:
+            expanded = content_widget.isVisible()
+            content_widget.setVisible(not expanded)
+            if expanded:
+                lbl.setVisible(False)
+                btn_collapse.setText("◀")
+                btn_collapse.setToolTip("Panel kinyitása")
+                dock.setMinimumWidth(0)
+                dock.setMaximumWidth(_COLLAPSED_WIDTH)
+            else:
+                lbl.setVisible(True)
+                btn_collapse.setText("▶")
+                btn_collapse.setToolTip("Panel összecsukása")
+                dock.setMinimumWidth(0)
+                dock.setMaximumWidth(16777215)
+
+        btn_collapse.clicked.connect(toggle_collapse)
+        bar_layout.addWidget(btn_collapse)
+
+        dock.setTitleBarWidget(bar)
+        self._dock_titlebar_label = lbl
+        self._dock_titlebar_button = btn_collapse
+        self._update_dock_titlebar_style()
+
+    def _update_dock_titlebar_style(self) -> None:
+        if not hasattr(self, "_dock_titlebar_label"):
+            return
+        dark = getattr(self, "_is_dark_theme", False)
+        bar_bg = "#0F5132"
+        if dark:
+            self._dock_titlebar_label.setStyleSheet(
+                f"background-color: {bar_bg}; color: #FFFFFF; font-weight: 800; font-size: 11px; padding: 4px;"
+            )
+            self._dock_titlebar_button.setStyleSheet(
+                f"QToolButton {{ background-color: {bar_bg}; color: #FFFFFF; font-weight: 800; "
+                "border-radius: 4px; border: 1px solid #10B981; }"
+                "QToolButton:hover { background-color: #10B981; color: #0F172A; }"
+            )
+        else:
+            self._dock_titlebar_label.setStyleSheet(
+                f"background-color: {bar_bg}; color: #FFFFFF; font-weight: 800; font-size: 11px; padding: 4px;"
+            )
+            self._dock_titlebar_button.setStyleSheet(
+                f"QToolButton {{ background-color: {bar_bg}; color: #FFFFFF; font-weight: 800; "
+                "border-radius: 4px; border: 1px solid #FFFFFF; }"
+                "QToolButton:hover { background-color: #10B981; }"
+            )
+        self._dock_titlebar_label.parentWidget().setStyleSheet(f"background-color: {bar_bg};")
 
     def _update_dock_nav_styles(self) -> None:
         dark = getattr(self, "_is_dark_theme", False)
@@ -2542,15 +2611,6 @@ class MainWindow(QMainWindow):
             self._start_tracker()
 
     @pyqtSlot()
-    def _on_auto_arm_toggled(self, checked: bool) -> None:
-        """Auto-élesítés be/kikapcsolása."""
-        self._auto_arm_enabled = checked
-        if checked:
-            self._status_bar.showMessage("Auto-élesítés BEKAPCSOLVA: lövések után automatikus élesítés.")
-        else:
-            self._status_bar.showMessage("Auto-élesítés KIKAPCSOLVA: manuális élesítés szükséges.")
-
-    @pyqtSlot()
     def _on_clear_history(self) -> None:
         if self._worker:
             self._worker.disarm_shot()
@@ -2698,26 +2758,83 @@ class MainWindow(QMainWindow):
             self._lbl_time.setText("—")
             self._lbl_zone.setText("— KÖZÉP —")
 
-        # --- Lövés-jelölő pozíció a kapu-vizualizációhoz ---
-        # A ballisztikus impact.y_mm (magasság) gyors lövésnél megbízhatatlan a sztereó
-        # Y-hiba miatt, ezért a magasságot – ha van érvényes MÉRT pozíció – mindig onnan
-        # vesszük, nem a ballisztikus előrejelzésből (ami akár 0-ra is klampolódhat).
-        # Az X koordinátát a megbízható ballisztikus predikcióból vagy mérésből vesszük.
+        # ── Lövés-jelölő pozíció a kapu-vizualizációhoz ─────────────────────
+        # Y-t a mért pozícióból vesszük (ballisztikus Y gyors lövésnél megbízhatatlan).
+        # X-et a ballisztikus predikcióból vesszük, csavar esetén mért trendel korrigálva.
         goal_w = float(self._config.get("geometry", {}).get("goal_width_mm", 4000.0))
         goal_h = float(self._config.get("geometry", {}).get("goal_height_mm", 2000.0))
-        # Az `in_goal` eredményt is az X-alapú, megbízható margóellenőrzéssel számoljuk
-        # (nem `impact.in_goal`-ból, ami a törékeny ballisztikus Y-on múlik és gyors
-        # lövésnél szinte mindig False-t adna, l. shot_detection repo memória).
         goal_margin_mm = float(self._config.get("geometry", {}).get("goal_margin_mm", 150.0))
         y_off = float(self._config.get("geometry", {}).get("impact_y_offset_mm", 0.0))
+
+        # ── X-trend puffer: csavar/kurva korrekció ──────────────────────────
+        # Aktív lövés alatt gyűjtjük a mért stereo X pozíciókat (Z-vel együtt),
+        # hogy a ballisztikus predikció helyett lineáris extrapolációval határozzuk
+        # meg az impact X-et. Csavart labdánál a pálya nem egyenes → a mért trend
+        # pontosabb, mint a "gravitáció + drag" fizikai modell (ami nem tud forgásról).
+        if shot_confirmed_event:
+            # Lövés elején nullázzuk a puffert
+            self._shot_x_trend_buf = []
+        if (shot_active or shot_confirmed_event) and stats.get("stereo_measured", False) and stats.get("pos_valid", False):
+            _tx = float(stats.get("x_3d", 0.0))
+            _tz = float(stats.get("z_3d", 0.0))
+            _tt = float(stats.get("source_timestamp", time.perf_counter()))
+            if _tz > 50.0:  # Csak ha még nem a kapunál van (Z > 50 mm)
+                self._shot_x_trend_buf.append((_tx, _tz, _tt))
+                # Max 20 pont – a legújabb mérések a relevánsak
+                if len(self._shot_x_trend_buf) > 20:
+                    self._shot_x_trend_buf.pop(0)
+
+        # ── X-trend extrapoláció: Z=0 síkra vetítés ─────────────────────────
+        def _extrapolate_x_at_goal(buf: list) -> Optional[float]:
+            """Lineáris X(Z) illesztéssel extrapolálja az impact X-et Z=0-nál.
+
+            Legalább 4 pont kell, és az illesztés R² > 0.85 kell (konzisztens trend).
+            Ha a labda csavart pályán jön, az X(Z) trend eltér az egyenestől –
+            de az utolsó néhány méterben a lineáris közelítés már jó becslés.
+            """
+            if len(buf) < 4:
+                return None
+            try:
+                zs = np.array([b[1] for b in buf], dtype=np.float64)
+                xs = np.array([b[0] for b in buf], dtype=np.float64)
+                # Lineáris illesztés: X = a*Z + b (Z csökken a kapuhoz közeledve)
+                coeffs = np.polyfit(zs, xs, 1)
+                x_at_zero = float(np.polyval(coeffs, 0.0))
+                # R² számítás – csak konzisztens trend esetén használjuk
+                xs_pred = np.polyval(coeffs, zs)
+                ss_res = float(np.sum((xs - xs_pred) ** 2))
+                ss_tot = float(np.sum((xs - float(np.mean(xs))) ** 2))
+                r2 = 1.0 - ss_res / ss_tot if ss_tot > 1e-6 else 0.0
+                if r2 >= 0.85:
+                    return x_at_zero
+            except Exception:
+                pass
+            return None
+
         shot_pt: Optional[Tuple[float, float, float, float, bool]] = None
         if impact and impact.valid:
             if stats.get("pos_valid"):
                 sy_disp = min(max(float(stats.get("y_3d", impact.y_mm)) + y_off, 0.0), goal_h)
             else:
                 sy_disp = min(max(impact.y_mm + y_off, 0.0), goal_h)
-            eff_in_goal = abs(impact.x_mm) <= (goal_w / 2.0 + goal_margin_mm)
-            shot_pt = (impact.x_mm, sy_disp, impact.confidence,
+
+            # X korrekció: ha van elegendő mért trend és az R² jó, korrigálunk
+            sx_corrected = impact.x_mm
+            x_trend_val = _extrapolate_x_at_goal(self._shot_x_trend_buf)
+            if x_trend_val is not None:
+                # Ha az eltérés > 30 mm (érdemi csavar), alkalmazzuk a korrekciót.
+                # Kis eltérésnél a ballisztikus predikció pontosabb (mérési zaj).
+                deviation_mm = abs(x_trend_val - impact.x_mm)
+                if deviation_mm > 30.0:
+                    sx_corrected = x_trend_val
+                    logger.debug(
+                        "X-trend korrekció alkalmazva: ballisztikus=%.0f → mért trend=%.0f mm "
+                        "(eltérés=%.0f mm, R²≥0.85)",
+                        impact.x_mm, x_trend_val, deviation_mm,
+                    )
+
+            eff_in_goal = abs(sx_corrected) <= (goal_w / 2.0 + goal_margin_mm)
+            shot_pt = (sx_corrected, sy_disp, impact.confidence,
                        impact.time_to_impact_s, eff_in_goal)
         elif (shot_confirmed_event or shot_active) and stats.get("pos_valid"):
             sx = float(stats.get("x_3d", 0.0))
@@ -2887,20 +3004,28 @@ class MainWindow(QMainWindow):
                         )
 
         if shot_finished:
+            # ── Analitika frissítése a VÉGLEGES (marker-locked) pozícióval ──
+            # A shot_confirmed_event-nél rögzített pozíció még korai becslés volt.
+            # A GoalView._impact_x_mm/_impact_y_mm most tartalmazza a finomított,
+            # rögzített értéket – ezt írjuk vissza az analytics utolsó rekordjába,
+            # hogy ugyanaz jelenjen meg mint a kapu-vizualizációban.
+            if hasattr(self, "_analytics_view") and self._analytics_view:
+                _gv_final = getattr(self, "_goal_view", None)
+                if _gv_final is not None:
+                    _fx = getattr(_gv_final, "_impact_x_mm", None)
+                    _fy = getattr(_gv_final, "_impact_y_mm", None)
+                    _fin_goal = getattr(_gv_final, "_in_goal", False)
+                    if _fx is not None and _fy is not None:
+                        self._analytics_view.update_last_shot_position(
+                            float(_fx), float(_fy), bool(_fin_goal)
+                        )
             if hasattr(self, "_goal_view") and self._goal_view:
                 self._goal_view.finish_shot()
             if hasattr(self, "_goal_view_full") and self._goal_view_full:
                 self._goal_view_full.finish_shot()
-            # Auto-élesítés mód: ha be van kapcsolva, automatikusan élesítjük a következő lövést
-            if self._auto_arm_enabled and self._worker and self._is_running:
-                self._shot_arm_time = time.time()
-                self._worker.arm_next_shot()
-                self._set_shot_arm_button(True, False)
-                self._status_bar.showMessage("Auto-élesítés: következő lövés élesítve.")
-            else:
-                # Manual arm módban: a lövés lezárása után visszaváltunk DISARMED-ra,
-                # így a felhasználónak újra kell élesítenie a következő lövést.
-                self._set_shot_arm_button(False, False)
+            # A lövés lezárása után mindig DISARMED-ra váltunk – a felhasználónak
+            # újra kell élesítenie a következő lövést.
+            self._set_shot_arm_button(False, False)
 
         det_str = "Mindkét kamerában" if stats["both_found"] else (
             "Csak bal kamera" if stats["left_found"] else (
@@ -3096,6 +3221,7 @@ class MainWindow(QMainWindow):
         # 3. Nézetváltó és Dock Navigációs gombok
         self._update_view_btn_styles()
         self._update_dock_nav_styles()
+        self._update_dock_titlebar_style()
 
         # 4. Telemetriai kártyák
         for w, t_lbl, val_lbl, default_color in getattr(self, "_telemetry_cards", []):

@@ -418,10 +418,6 @@ shot_detection:
   max_missing_frames: 4
   cooldown_s: 2.5
 
-  # Automatikus élesítés mód: ha true, a lövés lezárása után automatikusan élesíti a következőt.
-  # Teszteléshez hasznos, éles üzemben false ajánlott.
-  auto_rearm: false
-
 
 # =============================================================================
 # Munkamenet perzisztencia
@@ -467,7 +463,7 @@ gui:
     max_shot_history: 15          # Maximum megőrzött lövés
     # A megerősített lövés jelölőjét legfeljebb ennyi (mindkét kamerás, sztereó)
     # mérés finomítja, utána rögzül; az első rossz/hiányzó mérésnél azonnal rögzül.
-    marker_lock_samples: 8
+    marker_lock_samples: 10
 
 
 # =============================================================================

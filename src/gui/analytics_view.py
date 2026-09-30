@@ -83,6 +83,11 @@ class GoalHeatmapWidget(QWidget):
 
         self.update()
 
+    def showEvent(self, event) -> None:
+        """Tab-ra váltáskor mindig újrarajzolja a hőtérképet a tárolt adatokból."""
+        super().showEvent(event)
+        self.update()
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -130,6 +135,8 @@ class GoalHeatmapWidget(QWidget):
                     painter.drawText(cell_r, Qt.AlignmentFlag.AlignCenter, str(count))
 
         # Keret & tengely feliratok
+        # NoBrush kell, különben az utolsó rács-cella kitöltése fedi le a teljes keretet.
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(QColor("#0F5132"), 3))
         painter.drawRect(rect)
 
@@ -159,12 +166,23 @@ class SpeedPlotWidget(QWidget):
         self._dark = dark
         self.update()
 
+    def clear(self) -> None:
+        """Törli az eddig gyűjtött sebesség/magasság historikát."""
+        self._speed_history.clear()
+        self._height_history.clear()
+        self.update()
+
     def add_data_point(self, speed_kmh: float, height_mm: float) -> None:
         self._speed_history.append(speed_kmh)
         self._height_history.append(height_mm)
         if len(self._speed_history) > 60:
             self._speed_history.pop(0)
             self._height_history.pop(0)
+        self.update()
+
+    def showEvent(self, event) -> None:
+        """Tab-ra váltáskor mindig újrarajzolja a grafikont a tárolt adatokból."""
+        super().showEvent(event)
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -310,11 +328,34 @@ class AnalyticsDashboardWidget(QWidget):
         self._heatmap.set_shots(self._shot_records)
         self._speed_plot.add_data_point(speed_kmh, y_mm)
         self._update_table_and_stats()
+        # Ha a widget éppen látható, azonnal újrarajzoltatjuk a widgeteket
+        self._heatmap.repaint()
+        self._speed_plot.repaint()
         return record  # Visszaadjuk a session manager számára
 
     def get_shot_records(self) -> List[dict]:
         """Visszaadja az összes lövési rekordot."""
         return list(self._shot_records)
+
+    def update_last_shot_position(self, x_mm: float, y_mm: float, in_goal: bool) -> None:
+        """Frissíti az utolsó rögzített lövés X/Y pozícióját és in_goal értékét.
+
+        A shot_confirmed_event pillanatában rögzített pozíció még a ballisztikus predikció
+        korai becslése. A GoalView ezután marker_update ciklusban finomítja (update_shot).
+        Ezt a metódust a shot_finished eseménynél kell hívni, hogy az analitika
+        ugyanazt a VÉGLEGES, lerögzített pozíciót mutassa, mint a kapu-vizualizáció.
+        """
+        if not self._shot_records:
+            return
+        rec = self._shot_records[-1]
+        rec["x_mm"] = round(x_mm, 1)
+        rec["y_mm"] = round(y_mm, 1)
+        rec["in_goal"] = in_goal
+        rec["sector"] = self._determine_sector(x_mm, y_mm)
+        # Hőtérkép és táblázat frissítése a végleges pozícióval
+        self._heatmap.set_shots(self._shot_records)
+        self._update_table_and_stats()
+        self._heatmap.repaint()
 
     def _determine_sector(self, x_mm: float, y_mm: float) -> str:
         """Meghatározza a becsapódási szektort az X,Y koordináták alapján."""
@@ -541,6 +582,7 @@ class AnalyticsDashboardWidget(QWidget):
     def _clear_analytics(self) -> None:
         self._shot_records.clear()
         self._heatmap.set_shots([])
+        self._speed_plot.clear()
         self._update_table_and_stats()
 
     @pyqtSlot()
